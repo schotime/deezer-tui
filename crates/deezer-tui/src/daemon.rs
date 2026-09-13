@@ -37,6 +37,8 @@ enum AsyncResult {
     SearchResults(Vec<TrackData>),
     SearchError(String),
     SearchDisplayResults(Vec<DisplayItem>),
+    NewReleasesLoaded(Vec<TrackData>),
+    NewReleasesError(String),
     /// Tracks for a favorites category. Carries the category the request was
     /// issued for so a late response cannot be attributed to another one.
     FavoritesLoaded(FavoritesCategory, Vec<TrackData>),
@@ -165,6 +167,12 @@ pub struct Daemon {
     search_category: SearchCategory,
     search_display: Vec<DisplayItem>,
     last_search_query: String,
+
+    // Explore → New Releases state, kept apart from Search so neither list
+    // shows the other's items.
+    new_releases: Vec<DisplayItem>,
+    new_releases_selected: usize,
+    new_releases_loading: bool,
 
     // Favorites state
     favorites: Vec<TrackData>,
@@ -333,6 +341,9 @@ impl Daemon {
             search_loading: false,
             search_category: SearchCategory::default(),
             search_display: Vec::new(),
+            new_releases: Vec::new(),
+            new_releases_selected: 0,
+            new_releases_loading: false,
             last_search_query: String::new(),
 
             favorites: Vec::new(),
@@ -608,6 +619,7 @@ impl Daemon {
             ActiveTab::Favorites => &mut self.favorites_selected,
             ActiveTab::Explore => match self.explore_category {
                 ExploreCategory::Moods => &mut self.moods_selected,
+                ExploreCategory::NewReleases => &mut self.new_releases_selected,
                 ExploreCategory::Categories => &mut self.genres_selected,
                 ExploreCategory::Radios => &mut self.radios_selected,
             },
@@ -622,6 +634,7 @@ impl Daemon {
             ActiveTab::Favorites => self.favorites_display.len(),
             ActiveTab::Explore => match self.explore_category {
                 ExploreCategory::Moods => self.moods.len(),
+                ExploreCategory::NewReleases => self.new_releases.len(),
                 ExploreCategory::Categories => self.genres.len(),
                 ExploreCategory::Radios => self.radios.len(),
             },
@@ -693,6 +706,12 @@ impl Daemon {
                 {
                     self.start_load_genres();
                 }
+                if cat == ExploreCategory::NewReleases
+                    && self.new_releases.is_empty()
+                    && !self.new_releases_loading
+                {
+                    self.start_load_new_releases();
+                }
             }
             ActiveTab::Downloads => {
                 let Some(&cat) = OfflineCategory::ALL.get(index) else {
@@ -741,6 +760,26 @@ impl Daemon {
                         }
                         self.start_play_track(track.clone());
                     }
+                }
+            }
+            Command::PlayFromNewReleases { index } => {
+                if let Some(track) = self.new_releases.get(index).and_then(|d| d.track.clone()) {
+                    let playable: Vec<TrackData> = self
+                        .new_releases
+                        .iter()
+                        .filter_map(|d| d.track.clone())
+                        .collect();
+                    let queue_idx = playable
+                        .iter()
+                        .position(|t| t.track_id == track.track_id)
+                        .unwrap_or(0);
+                    self.flow_active = false;
+                    self.active_mood = None;
+                    if let Ok(mut state) = self.player_state.lock() {
+                        state.queue = playable;
+                        state.queue_index = queue_idx;
+                    }
+                    self.start_play_track(track);
                 }
             }
             Command::PlayFromFavorites { index } => {
@@ -1137,6 +1176,8 @@ impl Daemon {
                 }
                 self.search_results.clear();
                 self.search_display.clear();
+                self.new_releases.clear();
+                self.new_releases_selected = 0;
                 self.favorites.clear();
                 self.favorites_display.clear();
                 self.radios.clear();
@@ -1300,6 +1341,9 @@ impl Daemon {
             search_loading: self.search_loading,
             search_category: self.search_category,
             search_display: self.search_display.clone(),
+            new_releases: self.new_releases.clone(),
+            new_releases_selected: self.new_releases_selected,
+            new_releases_loading: self.new_releases_loading,
             favorites: self.favorites.clone(),
             favorites_selected: self.favorites_selected,
             favorites_loading: self.favorites_loading,
@@ -2243,6 +2287,26 @@ impl Daemon {
         });
     }
 
+    fn start_load_new_releases(&mut self) {
+        if self.is_offline {
+            return;
+        }
+        self.new_releases_loading = true;
+        let client = Arc::clone(&self.client);
+        let tx = self.async_tx.clone();
+        tokio::spawn(async move {
+            let client = client.lock().await;
+            match client.get_new_releases().await {
+                Ok(tracks) => {
+                    let _ = tx.send(AsyncResult::NewReleasesLoaded(tracks));
+                }
+                Err(e) => {
+                    let _ = tx.send(AsyncResult::NewReleasesError(e.to_string()));
+                }
+            }
+        });
+    }
+
     fn start_play_mood(
         &mut self,
         core_mood: deezer_core::api::models::MoodItem,
@@ -2882,6 +2946,18 @@ impl Daemon {
                     self.search_results.clear();
                     self.search_display = items;
                     self.search_selected = 0;
+                }
+                AsyncResult::NewReleasesLoaded(tracks) => {
+                    self.new_releases_loading = false;
+                    self.new_releases = tracks.iter().map(DisplayItem::from_track).collect();
+                    self.new_releases_selected = 0;
+                }
+                AsyncResult::NewReleasesError(err) => {
+                    self.new_releases_loading = false;
+                    self.status_msg = Some(t().fmt_error(
+                        t().explore_category_label(ExploreCategory::NewReleases),
+                        &err,
+                    ));
                 }
                 AsyncResult::SearchError(err) => {
                     self.search_loading = false;

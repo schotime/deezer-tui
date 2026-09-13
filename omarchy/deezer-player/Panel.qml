@@ -63,7 +63,7 @@ BarWidget {
     // spawning a second terminal instance.
     if (bar) bar.run("hyprctl clients -j | jq -e '.[] | select(.class == \"org.omarchy.deezer-tui\")' >/dev/null "
       + "&& hyprctl dispatch 'hl.dsp.focus({ window = \"class:^(org.omarchy.deezer-tui)$\" })' "
-      + "|| omarchy-launch-tui --app-id=org.omarchy.deezer-tui " + root.binary)
+      + "|| env COLORTERM=truecolor omarchy-launch-tui --app-id=org.omarchy.deezer-tui " + root.binary)
     root.close()
   }
 
