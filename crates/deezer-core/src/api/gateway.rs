@@ -314,120 +314,100 @@ impl DeezerClient {
         Ok(items)
     }
 
-    /// Get favorite artists via Deezer's authenticated gateway.
+    /// Get favorite artists from the authenticated GraphQL favorites list.
     ///
-    /// The public `/user/{id}/artists` endpoint increasingly returns an API
-    /// error for cookie-authenticated sessions (rather than a `data` list).
-    /// Keep favorites on the same authenticated gateway as loved tracks.
+    /// Deezer's public `/user/{id}/artists` endpoint requires a separate OAuth
+    /// token for private profiles. GraphQL supplies the user's private IDs;
+    /// the public per-artist endpoint then supplies display metadata.
     pub async fn get_favorite_artists(&self) -> Result<Vec<DisplayItem>, DeezerError> {
-        let results = self
-            .gw_call("favorite_artist.getList", json!({ "start": 0, "nb": 2000 }))
-            .await?;
-        let data = results
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| DeezerError::Api("Missing 'data' in favorite artists".into()))?;
-
-        debug!("favorite_artists: {} items", data.len());
-
-        let items = data
-            .iter()
-            .map(|entry| {
-                let artist_id = entry
-                    .get("ART_ID")
-                    .or_else(|| entry.get("id"))
-                    .and_then(value_string);
-                let name = entry
-                    .get("ART_NAME")
-                    .or_else(|| entry.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let nb_fan = entry
-                    .get("NB_FAN")
-                    .or_else(|| entry.get("nb_fan"))
-                    .and_then(value_u64)
-                    .unwrap_or(0);
-                DisplayItem {
-                    col1: name.to_string(),
-                    col2: format_fans(nb_fan),
-                    col3: String::new(),
-                    col4: String::new(),
-                    track: None,
-                    album_id: None,
-                    playlist_id: None,
-                    artist_id,
-                    show_id: None,
-                }
+        let ids = self.get_favorite_artist_ids().await?;
+        if ids.is_empty() { return Ok(Vec::new()); }
+        let query = r#"
+          query ArtistById($ids: [String!]!) {
+            artistsByIds(ids: $ids) {
+              id
+              name
+              fansCount
+            }
+          }
+        "#;
+        let data = self.graphql_call_with_variables(query, json!({ "ids": ids })).await?;
+        let artists = data.get("artistsByIds").and_then(|value| value.as_array())
+            .ok_or_else(|| DeezerError::Api("Missing artistsByIds in GraphQL response".into()))?;
+        let items: Vec<DisplayItem> = artists.iter().filter_map(|artist| {
+            let artist_id = artist.get("id").and_then(value_string)?;
+            Some(DisplayItem {
+                col1: artist.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                col2: format_fans(artist.get("fansCount").and_then(value_u64).unwrap_or(0)),
+                col3: String::new(),
+                col4: String::new(),
+                track: None,
+                album_id: None,
+                playlist_id: None,
+                artist_id: Some(artist_id),
+                show_id: None,
             })
-            .collect();
-
+        }).collect();
+        debug!("favorite_artists: {} items", items.len());
         Ok(items)
     }
 
-    /// Get favorite albums via Deezer's authenticated gateway.
+    /// Get favorite albums from the authenticated GraphQL favorites list.
     pub async fn get_favorite_albums(&self) -> Result<Vec<DisplayItem>, DeezerError> {
-        let results = self
-            .gw_call("favorite_album.getList", json!({ "start": 0, "nb": 2000 }))
-            .await?;
-        let data = results
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| DeezerError::Api("Missing 'data' in favorite albums".into()))?;
-
-        debug!("favorite_albums: {} items", data.len());
-
-        let items = data
-            .iter()
-            .map(|entry| {
-                let album_id = entry
-                    .get("ALB_ID")
-                    .or_else(|| entry.get("id"))
-                    .and_then(value_string);
-                let title = entry
-                    .get("ALB_TITLE")
-                    .or_else(|| entry.get("title"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let artist = entry
-                    .get("ART_NAME")
-                    .or_else(|| entry.get("artist").and_then(|a| a.get("name")))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let nb_tracks = entry
-                    .get("NB_SONG")
-                    .or_else(|| entry.get("nb_tracks"))
-                    .and_then(value_u64)
-                    .unwrap_or(0);
-                let release_date = entry
-                    .get("PHYSICAL_RELEASE_DATE")
-                    .or_else(|| entry.get("release_date"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                DisplayItem {
-                    col1: title.to_string(),
-                    col2: artist.to_string(),
-                    col3: release_date.to_string(),
-                    col4: nb_tracks.to_string(),
-                    track: None,
-                    album_id,
-                    playlist_id: None,
-                    artist_id: None,
-                    show_id: None,
-                }
+        let ids = self.get_favorite_album_ids().await?;
+        if ids.is_empty() { return Ok(Vec::new()); }
+        let query = r#"
+          query AlbumsById($ids: [String!]!) {
+            albumsByIds(ids: $ids) {
+              id
+              displayTitle
+              contributors { edges { node { ... on Artist { name } } } }
+              releaseDate
+            }
+          }
+        "#;
+        let data = self.graphql_call_with_variables(query, json!({ "ids": ids })).await?;
+        let albums = data.get("albumsByIds").and_then(|value| value.as_array())
+            .ok_or_else(|| DeezerError::Api("Missing albumsByIds in GraphQL response".into()))?;
+        let items: Vec<DisplayItem> = albums.iter().filter_map(|album| {
+            let album_id = album.get("id").and_then(value_string)?;
+            Some(DisplayItem {
+                col1: album.get("displayTitle").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                col2: album.pointer("/contributors/edges/0/node/name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                col3: album.get("releaseDate").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                col4: String::new(),
+                track: None,
+                album_id: Some(album_id),
+                playlist_id: None,
+                artist_id: None,
+                show_id: None,
             })
-            .collect();
-
+        }).collect();
+        debug!("favorite_albums: {} items", items.len());
         Ok(items)
     }
 
-    /// Raw playlist entries from the user's own profile page, via the
-    /// authenticated gateway.
-    ///
-    /// This is deliberately not `api.deezer.com/user/{id}/playlists`: the
-    /// public REST API only ever exposes playlists whose visibility is public,
-    /// so every private playlist is silently absent from its response even
-    /// when the request carries a valid session.
-    async fn fetch_profile_playlists(&self) -> Result<Vec<serde_json::Value>, DeezerError> {
+    pub async fn get_favorite_artist_ids(&self) -> Result<Vec<String>, DeezerError> {
+        self.graphql_favorite_ids("rawArtists").await
+    }
+
+    pub async fn get_favorite_album_ids(&self) -> Result<Vec<String>, DeezerError> {
+        self.graphql_favorite_ids("rawAlbums").await
+    }
+
+    async fn graphql_favorite_ids(&self, field: &str) -> Result<Vec<String>, DeezerError> {
+        let query = format!("{{ me {{ userFavorites {{ {field} {{ id }} }} }} }}");
+        let data = self.graphql_call(&query).await?;
+        let entries = data.pointer(&format!("/me/userFavorites/{field}"))
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| DeezerError::Api(format!("Missing userFavorites.{field} in GraphQL response")))?;
+        Ok(entries.iter().filter_map(|entry| entry.get("id").and_then(value_string)).collect())
+    }
+
+    /// Raw entries from one tab of the user's own profile page, via the
+    /// authenticated gateway. This path includes private profile data that the
+    /// public REST API omits or rejects for cookie-authenticated sessions.
+    async fn fetch_profile_tab(&self, tab: &str) -> Result<Vec<serde_json::Value>, DeezerError> {
         let session = self
             .session
             .as_ref()
@@ -435,19 +415,24 @@ impl DeezerClient {
 
         let params = json!({
             "user_id": session.user_id,
-            "tab": "playlists",
+            "tab": tab,
             "nb": 2000,
         });
 
         let results = self.gw_call("deezer.pageProfile", params).await?;
         let data = results
             .get("TAB")
-            .and_then(|t| t.get("playlists"))
+            .and_then(|t| t.get(tab))
             .and_then(|p| p.get("data"))
-            .ok_or_else(|| DeezerError::Api("Missing TAB.playlists.data in profile".into()))?;
+            .ok_or_else(|| DeezerError::Api(format!("Missing TAB.{tab}.data in profile")))?;
 
         serde_json::from_value(data.clone())
-            .map_err(|e| DeezerError::Api(format!("Failed to parse playlists: {e}")))
+            .map_err(|e| DeezerError::Api(format!("Failed to parse profile {tab}: {e}")))
+    }
+
+    /// Raw playlist entries from the user's own profile page.
+    async fn fetch_profile_playlists(&self) -> Result<Vec<serde_json::Value>, DeezerError> {
+        self.fetch_profile_tab("playlists").await
     }
 
     /// Get user playlists for the Playlists tab — public and private alike.
@@ -1379,10 +1364,20 @@ impl DeezerClient {
     /// the user (#14). The retry is bounded to one attempt: if the fresh token
     /// is rejected too, the ARL itself is dead and only a real re-login helps.
     async fn graphql_call(&self, query: &str) -> Result<serde_json::Value, DeezerError> {
-        match self.graphql_attempt(query, false).await {
+        self.graphql_call_with_variables(query, json!({})).await
+    }
+
+    /// GraphQL variant for operations with variables, such as the batched
+    /// `artistsByIds` lookup used after loading private favorites.
+    async fn graphql_call_with_variables(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<serde_json::Value, DeezerError> {
+        match self.graphql_attempt(query, &variables, false).await {
             Err(e) if is_stale_jwt(&e) => {
                 debug!("GraphQL rejected the JWT ({e}); refreshing and retrying once");
-                self.graphql_attempt(query, true).await
+                self.graphql_attempt(query, &variables, true).await
             }
             other => other,
         }
@@ -1392,10 +1387,11 @@ impl DeezerClient {
     async fn graphql_attempt(
         &self,
         query: &str,
+        variables: &serde_json::Value,
         force_new_jwt: bool,
     ) -> Result<serde_json::Value, DeezerError> {
         let jwt = self.ensure_jwt(force_new_jwt).await?;
-        let body = json!({ "query": query });
+        let body = json!({ "query": query, "variables": variables });
 
         let resp = self
             .http

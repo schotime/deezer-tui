@@ -1733,12 +1733,12 @@ impl Daemon {
                 Ok(tracks) => tracks.iter().map(|t| t.track_id.clone()).collect(),
                 Err(_) => Vec::new(),
             };
-            let artist_ids = match client.get_favorite_artists().await {
-                Ok(items) => items.iter().filter_map(|d| d.artist_id.clone()).collect(),
+            let artist_ids = match client.get_favorite_artist_ids().await {
+                Ok(ids) => ids,
                 Err(_) => Vec::new(),
             };
-            let album_ids = match client.get_favorite_albums().await {
-                Ok(items) => items.iter().filter_map(|d| d.album_id.clone()).collect(),
+            let album_ids = match client.get_favorite_album_ids().await {
+                Ok(ids) => ids,
                 Err(_) => Vec::new(),
             };
             let _ = tx.send(AsyncResult::FavoriteIdsLoaded {
