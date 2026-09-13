@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Mpris
 import qs.Commons
 import qs.Ui
 
@@ -19,6 +20,16 @@ BarWidget {
   readonly property color accent: Color.accent
   readonly property color surface: Color.popups.background
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property var mprisPlayers: Mpris.players ? Mpris.players.values : []
+  readonly property var mprisPlayer: {
+    for (var i = 0; i < mprisPlayers.length; i++) {
+      var player = mprisPlayers[i]
+      var name = String(player.identity || player.desktopEntry || "").toLowerCase()
+      if (name.indexOf("deezer") !== -1) return player
+    }
+    return null
+  }
+  readonly property string artworkUrl: mprisPlayer ? String(mprisPlayer.trackArtUrl || "") : ""
 
   property string playbackStatus: "offline"
   property string title: "Deezer is not running"
@@ -158,9 +169,19 @@ BarWidget {
             height: width
             radius: Style.cornerRadius
             color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+            clip: true
+
+            Image {
+              anchors.fill: parent
+              visible: root.artworkUrl !== ""
+              source: root.artworkUrl
+              fillMode: Image.PreserveAspectCrop
+              asynchronous: true
+            }
 
             Text {
               anchors.centerIn: parent
+              visible: root.artworkUrl === ""
               text: root.playbackStatus === "playing" ? "󰎈" : "󰝚"
               color: root.accent
               font.family: root.fontFamily
