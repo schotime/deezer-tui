@@ -3,7 +3,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use crate::client::{ClickTarget, InputMode, RowsKind, ViewState};
 use crate::i18n::t;
-use crate::protocol::SearchCategory;
+use crate::protocol::{ExploreCategory, SearchCategory};
 use crate::theme::Theme;
 use crate::ui::common;
 use crate::ui::common::{track_status, STATUS_WIDTH};
@@ -52,7 +52,7 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState, area: Rect) {
 
         draw_search_input(frame, view, chunks[0]);
         draw_category_menu(frame, view, chunks[1]);
-        draw_results_table(frame, view, chunks[2]);
+        draw_results_table(frame, view, chunks[2], ResultsSource::Search);
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -63,8 +63,21 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState, area: Rect) {
             .split(area);
 
         draw_search_input(frame, view, chunks[0]);
-        draw_results_table(frame, view, chunks[1]);
+        draw_results_table(frame, view, chunks[1], ResultsSource::Search);
     }
+}
+
+/// Reuse the playable track table without Search's input and category controls.
+pub fn draw_new_releases(frame: &mut Frame, view: &mut ViewState, area: Rect) {
+    draw_results_table(frame, view, area, ResultsSource::NewReleases);
+}
+
+/// Which playable list `draw_results_table` renders. The lists live in separate
+/// state so Search results never show under New Releases, or the other way round.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResultsSource {
+    Search,
+    NewReleases,
 }
 
 fn draw_search_input(frame: &mut Frame, view: &ViewState, area: Rect) {
@@ -114,17 +127,37 @@ fn draw_category_menu(frame: &mut Frame, view: &ViewState, area: Rect) {
     common::draw_category_menu(frame, view, area, &labels, current);
 }
 
-fn draw_results_table(frame: &mut Frame, view: &mut ViewState, area: Rect) {
+fn draw_results_table(frame: &mut Frame, view: &mut ViewState, area: Rect, source: ResultsSource) {
     let s = t();
-    if view.search_loading {
+    let (items, selected, loading, category) = match source {
+        ResultsSource::Search => (
+            &view.search_display,
+            view.search_selected,
+            view.search_loading,
+            view.search_category,
+        ),
+        // New Releases is always a track list.
+        ResultsSource::NewReleases => (
+            &view.new_releases,
+            view.new_releases_selected,
+            view.new_releases_loading,
+            SearchCategory::Track,
+        ),
+    };
+
+    if loading {
+        let message = match source {
+            ResultsSource::Search => s.searching,
+            ResultsSource::NewReleases => s.loading,
+        };
         let loading =
-            Paragraph::new(Span::styled(s.searching, Theme::dim())).alignment(Alignment::Center);
+            Paragraph::new(Span::styled(message, Theme::dim())).alignment(Alignment::Center);
         frame.render_widget(loading, area);
         return;
     }
 
-    if view.search_display.is_empty() {
-        if view.search_input.is_empty() {
+    if items.is_empty() {
+        if source == ResultsSource::Search && view.search_input.is_empty() {
             // No search performed yet — show text logo
             common::render_logo(frame, area);
         } else {
@@ -135,18 +168,24 @@ fn draw_results_table(frame: &mut Frame, view: &mut ViewState, area: Rect) {
         return;
     }
 
-    let headers = s.search_category_headers(view.search_category);
-    let header = Row::new(vec![
+    // New Releases sits among Explore's numbered lists (Moods, Categories,
+    // Radios), so it gets their `#` column after the track status column.
+    let numbered = source == ResultsSource::NewReleases;
+
+    let headers = s.search_category_headers(category);
+    let mut header_cells = vec![
         Cell::from(Span::raw("")),
         Cell::from(Span::styled(headers[0], Theme::dim())),
         Cell::from(Span::styled(headers[1], Theme::dim())),
         Cell::from(Span::styled(headers[2], Theme::dim())),
         Cell::from(Span::styled(headers[3], Theme::dim())),
-    ])
-    .height(1);
+    ];
+    if numbered {
+        header_cells.insert(1, Cell::from(Span::styled("#", Theme::dim())));
+    }
+    let header = Row::new(header_cells).height(1);
 
-    let rows: Vec<Row> = view
-        .search_display
+    let rows: Vec<Row> = items
         .iter()
         .enumerate()
         .map(|(i, item)| {
@@ -158,13 +197,8 @@ fn draw_results_table(frame: &mut Frame, view: &mut ViewState, area: Rect) {
                 .track
                 .as_ref()
                 .is_some_and(|t| view.is_track_favorite(&t.track_id));
-            Row::new(vec![
-                Cell::from(track_status(
-                    i == view.search_selected,
-                    is_playing,
-                    is_fav,
-                    view.status,
-                )),
+            let mut cells = vec![
+                Cell::from(track_status(i == selected, is_playing, is_fav, view.status)),
                 Cell::from(Span::styled(&item.col1, Theme::text())),
                 Cell::from(Span::styled(
                     &item.col2,
@@ -172,12 +206,29 @@ fn draw_results_table(frame: &mut Frame, view: &mut ViewState, area: Rect) {
                 )),
                 Cell::from(Span::styled(&item.col3, Theme::dim())),
                 Cell::from(Span::styled(&item.col4, Theme::dim())),
-            ])
+            ];
+            if numbered {
+                cells.insert(
+                    1,
+                    Cell::from(Span::styled(format!("{:>3}", i + 1), Theme::dim())),
+                );
+            }
+            Row::new(cells)
         })
         .collect();
 
-    let title = s.results_title(view.search_display.len());
-    let widths = column_widths(view.search_category);
+    let count = items.len();
+    let title = match source {
+        ResultsSource::Search => s.results_title(count),
+        ResultsSource::NewReleases => format!(
+            " {} ({count}) ",
+            s.explore_category_label(ExploreCategory::NewReleases)
+        ),
+    };
+    let mut widths = column_widths(category).to_vec();
+    if numbered {
+        widths.insert(1, Constraint::Length(4));
+    }
     let table = Table::new(rows, widths)
         .header(header)
         .block(
@@ -189,13 +240,13 @@ fn draw_results_table(frame: &mut Frame, view: &mut ViewState, area: Rect) {
         .row_highlight_style(Theme::highlight())
         .highlight_symbol("");
 
-    let mut table_state = view.table_state(RowsKind::Tab, view.search_selected);
+    let mut table_state = view.table_state(RowsKind::Tab, selected);
     frame.render_stateful_widget(table, area, &mut table_state);
     view.record_rows(
         area,
         2, // title + header
         table_state.offset(),
-        view.search_display.len(),
+        count,
         RowsKind::Tab,
     );
 }

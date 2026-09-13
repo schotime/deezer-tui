@@ -5,7 +5,7 @@ use crate::i18n::t;
 use crate::protocol::ExploreCategory;
 use crate::ui::{categories, common, moods, radio};
 
-pub fn draw(frame: &mut Frame, view: &ViewState, area: Rect) {
+pub fn draw(frame: &mut Frame, view: &mut ViewState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -18,6 +18,9 @@ pub fn draw(frame: &mut Frame, view: &ViewState, area: Rect) {
 
     match view.explore_category {
         ExploreCategory::Moods => moods::draw(frame, view, chunks[1]),
+        ExploreCategory::NewReleases => {
+            crate::ui::search::draw_new_releases(frame, view, chunks[1])
+        }
         ExploreCategory::Categories => categories::draw(frame, view, chunks[1]),
         ExploreCategory::Radios => radio::draw(frame, view, chunks[1]),
     }

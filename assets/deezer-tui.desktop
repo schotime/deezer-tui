@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Deezer TUI
+Comment=Deezer music player in the terminal
+Exec=deezer-tui
+Icon=deezer-tui
+Terminal=true
+Categories=AudioVideo;Audio;Player;ConsoleOnly;
+Keywords=deezer;music;player;

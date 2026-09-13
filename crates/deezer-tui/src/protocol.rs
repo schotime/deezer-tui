@@ -22,6 +22,8 @@ pub enum Command {
     Search { query: String },
     /// Play track at index from search results.
     PlayFromSearch { index: usize },
+    /// Play track at index from Explore's New Releases list.
+    PlayFromNewReleases { index: usize },
     /// Play track at index from favorites.
     PlayFromFavorites { index: usize },
     /// Toggle play/pause.
@@ -260,12 +262,18 @@ pub enum ActiveTab {
 pub enum ExploreCategory {
     #[default]
     Moods,
+    NewReleases,
     Categories,
     Radios,
 }
 
 impl ExploreCategory {
-    pub const ALL: [Self; 3] = [Self::Moods, Self::Categories, Self::Radios];
+    pub const ALL: [Self; 4] = [
+        Self::Moods,
+        Self::NewReleases,
+        Self::Categories,
+        Self::Radios,
+    ];
 }
 
 /// A music genre/category for display.
@@ -413,6 +421,14 @@ pub struct DaemonSnapshot {
     #[serde(default)]
     pub search_display: Vec<DisplayItem>,
 
+    // Explore → New Releases (separate from Search so neither list leaks into the other)
+    #[serde(default)]
+    pub new_releases: Vec<DisplayItem>,
+    #[serde(default)]
+    pub new_releases_selected: usize,
+    #[serde(default)]
+    pub new_releases_loading: bool,
+
     // Favorites
     #[serde(default)]
     pub favorites: Vec<TrackData>,
@@ -558,6 +574,9 @@ impl Default for DaemonSnapshot {
             search_loading: false,
             search_category: SearchCategory::default(),
             search_display: Vec::new(),
+            new_releases: Vec::new(),
+            new_releases_selected: 0,
+            new_releases_loading: false,
             favorites: Vec::new(),
             favorites_selected: 0,
             favorites_loading: false,

@@ -454,6 +454,7 @@ impl Strings {
     pub fn explore_category_label(&self, cat: ExploreCategory) -> &'static str {
         match cat {
             ExploreCategory::Moods => self.explore_cat_moods,
+            ExploreCategory::NewReleases => "New Releases",
             ExploreCategory::Categories => self.explore_cat_categories,
             ExploreCategory::Radios => self.explore_cat_radios,
         }

@@ -735,6 +735,9 @@ pub struct ViewState {
     pub search_loading: bool,
     pub search_category: SearchCategory,
     pub search_display: Vec<DisplayItem>,
+    pub new_releases: Vec<DisplayItem>,
+    pub new_releases_selected: usize,
+    pub new_releases_loading: bool,
     pub favorites: Vec<TrackData>,
     pub favorites_selected: usize,
     pub favorites_loading: bool,
@@ -920,6 +923,9 @@ impl ViewState {
             search_loading: snap.search_loading,
             search_category: snap.search_category,
             search_display: snap.search_display.clone(),
+            new_releases: snap.new_releases.clone(),
+            new_releases_selected: snap.new_releases_selected,
+            new_releases_loading: snap.new_releases_loading,
             favorites: snap.favorites.clone(),
             favorites_selected: snap.favorites_selected,
             favorites_loading: snap.favorites_loading,
@@ -1222,6 +1228,7 @@ impl ViewState {
             }
             ActiveTab::Explore => match self.explore_category {
                 ExploreCategory::Moods => {}
+                ExploreCategory::NewReleases => {}
                 ExploreCategory::Categories => {
                     self.genres_filter_typing = true;
                     if clear {
@@ -1290,6 +1297,9 @@ impl ViewState {
         self.search_loading = snap.search_loading;
         self.search_category = snap.search_category;
         self.search_display = snap.search_display;
+        self.new_releases = snap.new_releases;
+        self.new_releases_selected = snap.new_releases_selected;
+        self.new_releases_loading = snap.new_releases_loading;
         self.favorites = snap.favorites;
         self.favorites_selected = snap.favorites_selected;
         self.favorites_loading = snap.favorites_loading;
@@ -1802,6 +1812,25 @@ pub fn restore_terminal() {
     let _ = stdout.execute(SetTitle(""));
 }
 
+/// Terminal cell size in pixels, from the tty's window size.
+///
+/// `Picker::from_query_stdio` asks the terminal once, at startup, and foot can
+/// answer before it has applied the output's (fractional) scale — e.g. 14×33
+/// on a display whose real cells are 11×25. Covers encoded with that size
+/// spill past their cells and get cropped. The ioctl always reports the
+/// current size and needs no stdin round trip, so it is safe mid-loop.
+fn current_cell_size() -> Option<(u16, u16)> {
+    // SAFETY: TIOCGWINSZ only writes a `winsize` into the struct we pass.
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } != 0 {
+        return None;
+    }
+    if ws.ws_col == 0 || ws.ws_row == 0 || ws.ws_xpixel == 0 || ws.ws_ypixel == 0 {
+        return None;
+    }
+    Some((ws.ws_xpixel / ws.ws_col, ws.ws_ypixel / ws.ws_row))
+}
+
 impl Client {
     pub async fn connect() -> Result<Self> {
         let path = socket_path();
@@ -1887,6 +1916,29 @@ impl Client {
             }
             _ => None,
         }
+    }
+
+    /// Keep the picker's cell size in step with the terminal (see
+    /// `current_cell_size`), re-encoding the visible cover when it changes.
+    /// Returns true when it changed, so the caller can clear stale image pixels.
+    fn sync_picker_cell_size(&mut self) -> bool {
+        let Some(size) = current_cell_size() else {
+            return false;
+        };
+        if size == self.picker.font_size() {
+            return false;
+        }
+        let protocol = self.picker.protocol_type();
+        // The only constructor that takes a known cell size; the queried
+        // protocol is carried over, tmux is re-detected from the environment.
+        #[allow(deprecated)]
+        let mut picker = Picker::from_fontsize(size);
+        picker.set_protocol_type(protocol);
+        self.picker = picker;
+        if let Some(img) = self.image_cache.get(&self.view.cover_image_url) {
+            self.view.cover_image = Some(self.picker.new_resize_protocol(img.clone()));
+        }
+        true
     }
 
     /// Trigger async image fetch if the cover URL changed.
@@ -1989,11 +2041,16 @@ impl Client {
         }));
 
         // Load saved theme and opacity from config
-        let config = Config::load();
-        if let Some(ref theme_str) = config.theme {
-            if let Some(id) = ThemeId::from_str(theme_str) {
-                Theme::set(id);
-            }
+        let mut config = Config::load();
+        if let Some(id) = config.theme.as_deref().and_then(ThemeId::from_str) {
+            Theme::set(id);
+        } else {
+            // New installs follow the active Omarchy palette by default. Save
+            // the choice explicitly so a later launch cannot fall back to an
+            // old built-in Deezer palette.
+            Theme::set(ThemeId::Omarchy);
+            config.theme = Some(ThemeId::Omarchy.as_str().to_string());
+            let _ = config.save();
         }
         Theme::set_transparency(config.bg_transparency);
 
@@ -2070,6 +2127,12 @@ impl Client {
             }
             prev_over_image = over_image;
 
+            if self.sync_picker_cell_size() {
+                // A re-encoded cover can be smaller than the one on screen;
+                // clear so none of the old image's pixels are left around it.
+                terminal.clear()?;
+            }
+            Theme::refresh_omarchy();
             terminal.draw(|frame| {
                 ui::draw(frame, &mut self.view);
             })?;
@@ -2639,6 +2702,13 @@ impl Client {
                         ExploreCategory::Moods => {
                             self.view.moods_selected = self.view.moods_selected.saturating_sub(1);
                         }
+                        ExploreCategory::NewReleases => {
+                            self.view.new_releases_selected =
+                                self.view.new_releases_selected.saturating_sub(1);
+                            return KeyAction::SendCommand(Command::SelectIndex {
+                                index: self.view.new_releases_selected,
+                            });
+                        }
                         ExploreCategory::Categories => {
                             self.view.genres_selected = self.view.genres_selected.saturating_sub(1);
                         }
@@ -2671,6 +2741,16 @@ impl Client {
                                 self.view.moods_selected =
                                     (self.view.moods_selected + 1).min(self.view.moods.len() - 1);
                             }
+                        }
+                        ExploreCategory::NewReleases => {
+                            if !self.view.new_releases.is_empty() {
+                                self.view.new_releases_selected = (self.view.new_releases_selected
+                                    + 1)
+                                .min(self.view.new_releases.len() - 1);
+                            }
+                            return KeyAction::SendCommand(Command::SelectIndex {
+                                index: self.view.new_releases_selected,
+                            });
                         }
                         ExploreCategory::Categories => {
                             if !self.view.genres_filtered.is_empty() {
@@ -2765,6 +2845,11 @@ impl Client {
                                     index: self.view.moods_selected,
                                 })
                             }
+                        }
+                        ExploreCategory::NewReleases => {
+                            KeyAction::SendCommand(Command::PlayFromNewReleases {
+                                index: self.view.new_releases_selected,
+                            })
                         }
                         ExploreCategory::Radios => {
                             // Find the original index of the filtered radio in the full list
@@ -3485,6 +3570,12 @@ impl Client {
                 .get(self.view.search_selected)
                 .cloned(),
             ActiveTab::Favorites => self.view.favorites_selected_item().cloned(),
+            ActiveTab::Explore if self.view.explore_category == ExploreCategory::NewReleases => {
+                self.view
+                    .new_releases
+                    .get(self.view.new_releases_selected)
+                    .cloned()
+            }
             _ => None,
         };
 
@@ -3533,7 +3624,9 @@ impl Client {
 
         // Fall back to track popup
         let track = match self.view.active_tab {
-            ActiveTab::Search | ActiveTab::Favorites => display_item.and_then(|d| d.track),
+            ActiveTab::Search | ActiveTab::Favorites | ActiveTab::Explore => {
+                display_item.and_then(|d| d.track)
+            }
             _ => None,
         };
 
@@ -3845,6 +3938,9 @@ impl Client {
         let item = match self.view.active_tab {
             ActiveTab::Search => self.view.search_display.get(self.view.search_selected),
             ActiveTab::Favorites => self.view.favorites_selected_item(),
+            ActiveTab::Explore if self.view.explore_category == ExploreCategory::NewReleases => {
+                self.view.new_releases.get(self.view.new_releases_selected)
+            }
             _ => None,
         };
 
@@ -3875,6 +3971,9 @@ impl Client {
         let item = match self.view.active_tab {
             ActiveTab::Search => self.view.search_display.get(self.view.search_selected),
             ActiveTab::Favorites => self.view.favorites_selected_item(),
+            ActiveTab::Explore if self.view.explore_category == ExploreCategory::NewReleases => {
+                self.view.new_releases.get(self.view.new_releases_selected)
+            }
             _ => None,
         };
 
@@ -5174,6 +5273,12 @@ impl Client {
                 ActiveTab::Explore => {
                     match self.view.explore_category {
                         ExploreCategory::Moods => self.view.moods_selected = index,
+                        ExploreCategory::NewReleases => {
+                            // The daemon owns this cursor (it's in the snapshot), so
+                            // sync it or the next snapshot snaps the row back.
+                            self.view.new_releases_selected = index;
+                            return Some(Command::SelectIndex { index });
+                        }
                         ExploreCategory::Categories => self.view.genres_selected = index,
                         ExploreCategory::Radios => self.view.radios_selected = index,
                     }
