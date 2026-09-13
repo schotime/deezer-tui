@@ -28,6 +28,7 @@ BarWidget {
   property real duration: 0
   property int volume: 0
   property string lastError: ""
+  property bool opened: false
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -35,6 +36,10 @@ BarWidget {
   function refresh() {
     if (!statusProcess.running) statusProcess.running = true
   }
+
+  function open() { opened = true }
+  function close() { opened = false }
+  function toggle() { opened = !opened }
 
   function runAction(action) {
     if (actionProcess.running) return
