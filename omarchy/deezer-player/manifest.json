@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "schotime.deezer-player",
+  "name": "Deezer Player",
+  "version": "0.1.0",
+  "author": "schotime",
+  "license": "WTFPL",
+  "description": "A theme-native Omarchy control panel for deezer-tui.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Deezer Player",
+    "description": "Now playing and transport controls for deezer-tui.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaults": {
+      "command": "deezer-tui",
+      "refreshIntervalMs": 2000
+    },
+    "schema": [
+      {
+        "key": "command",
+        "type": "string",
+        "label": "deezer-tui command",
+        "defaultValue": "deezer-tui",
+        "description": "Path or command name for the deezer-tui binary."
+      },
+      {
+        "key": "refreshIntervalMs",
+        "type": "integer",
+        "label": "Refresh interval (milliseconds)",
+        "min": 1000,
+        "max": 10000,
+        "step": 500,
+        "defaultValue": 2000
+      }
+    ]
+  }
+}
