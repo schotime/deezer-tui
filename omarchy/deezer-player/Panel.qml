@@ -59,7 +59,11 @@ BarWidget {
   }
 
   function openTui() {
-    if (bar) bar.run("omarchy-launch-tui --app-id=org.omarchy.deezer-tui " + root.binary)
+    // Keep one TUI window: focus the existing app-id window instead of
+    // spawning a second terminal instance.
+    if (bar) bar.run("hyprctl clients -j | jq -e '.[] | select(.class == \"org.omarchy.deezer-tui\")' >/dev/null "
+      + "&& hyprctl dispatch focuswindow 'class:^(org.omarchy.deezer-tui)$' "
+      + "|| omarchy-launch-tui --app-id=org.omarchy.deezer-tui " + root.binary)
     root.close()
   }
 
