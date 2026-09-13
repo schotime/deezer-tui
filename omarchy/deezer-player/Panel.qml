@@ -43,7 +43,7 @@ BarWidget {
   }
 
   function openTui() {
-    if (bar) bar.run("omarchy-launch-tui --app-id org.omarchy.deezer-tui " + root.binary)
+    if (bar) bar.run("omarchy-launch-tui --app-id=org.omarchy.deezer-tui " + root.binary)
     root.close()
   }
 
