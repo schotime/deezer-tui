@@ -314,28 +314,16 @@ impl DeezerClient {
         Ok(items)
     }
 
-    /// Get favorite artists via the public API.
+    /// Get favorite artists via Deezer's authenticated gateway.
+    ///
+    /// The public `/user/{id}/artists` endpoint increasingly returns an API
+    /// error for cookie-authenticated sessions (rather than a `data` list).
+    /// Keep favorites on the same authenticated gateway as loved tracks.
     pub async fn get_favorite_artists(&self) -> Result<Vec<DisplayItem>, DeezerError> {
-        let session = self
-            .session
-            .as_ref()
-            .ok_or_else(|| DeezerError::Auth("Not authenticated".into()))?;
-
-        let url = format!(
-            "https://api.deezer.com/user/{}/artists?limit=2000",
-            session.user_id
-        );
-        let resp: serde_json::Value = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?;
-
-        let data = resp
+        let results = self
+            .gw_call("favorite_artist.getList", json!({ "start": 0, "nb": 2000 }))
+            .await?;
+        let data = results
             .get("data")
             .and_then(|d| d.as_array())
             .ok_or_else(|| DeezerError::Api("Missing 'data' in favorite artists".into()))?;
@@ -346,11 +334,19 @@ impl DeezerClient {
             .iter()
             .map(|entry| {
                 let artist_id = entry
-                    .get("id")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v.to_string());
-                let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let nb_fan = entry.get("nb_fan").and_then(|v| v.as_u64()).unwrap_or(0);
+                    .get("ART_ID")
+                    .or_else(|| entry.get("id"))
+                    .and_then(value_string);
+                let name = entry
+                    .get("ART_NAME")
+                    .or_else(|| entry.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let nb_fan = entry
+                    .get("NB_FAN")
+                    .or_else(|| entry.get("nb_fan"))
+                    .and_then(value_u64)
+                    .unwrap_or(0);
                 DisplayItem {
                     col1: name.to_string(),
                     col2: format_fans(nb_fan),
@@ -368,28 +364,12 @@ impl DeezerClient {
         Ok(items)
     }
 
-    /// Get favorite albums via the public API.
+    /// Get favorite albums via Deezer's authenticated gateway.
     pub async fn get_favorite_albums(&self) -> Result<Vec<DisplayItem>, DeezerError> {
-        let session = self
-            .session
-            .as_ref()
-            .ok_or_else(|| DeezerError::Auth("Not authenticated".into()))?;
-
-        let url = format!(
-            "https://api.deezer.com/user/{}/albums?limit=2000",
-            session.user_id
-        );
-        let resp: serde_json::Value = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?;
-
-        let data = resp
+        let results = self
+            .gw_call("favorite_album.getList", json!({ "start": 0, "nb": 2000 }))
+            .await?;
+        let data = results
             .get("data")
             .and_then(|d| d.as_array())
             .ok_or_else(|| DeezerError::Api("Missing 'data' in favorite albums".into()))?;
@@ -400,18 +380,27 @@ impl DeezerClient {
             .iter()
             .map(|entry| {
                 let album_id = entry
-                    .get("id")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v.to_string());
-                let title = entry.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                let artist = entry
-                    .get("artist")
-                    .and_then(|a| a.get("name"))
+                    .get("ALB_ID")
+                    .or_else(|| entry.get("id"))
+                    .and_then(value_string);
+                let title = entry
+                    .get("ALB_TITLE")
+                    .or_else(|| entry.get("title"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let nb_tracks = entry.get("nb_tracks").and_then(|v| v.as_u64()).unwrap_or(0);
+                let artist = entry
+                    .get("ART_NAME")
+                    .or_else(|| entry.get("artist").and_then(|a| a.get("name")))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let nb_tracks = entry
+                    .get("NB_SONG")
+                    .or_else(|| entry.get("nb_tracks"))
+                    .and_then(value_u64)
+                    .unwrap_or(0);
                 let release_date = entry
-                    .get("release_date")
+                    .get("PHYSICAL_RELEASE_DATE")
+                    .or_else(|| entry.get("release_date"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 DisplayItem {
@@ -1650,6 +1639,21 @@ fn parse_id(id: &str) -> serde_json::Value {
     } else {
         serde_json::Value::String(id.to_string())
     }
+}
+
+/// Deezer's gateway is inconsistent about IDs/counts: the same field can be
+/// a JSON number in one response and a string in another.
+fn value_string(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_u64().map(|number| number.to_string()))
+}
+
+fn value_u64(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
 }
 
 fn format_fans(n: u64) -> String {
