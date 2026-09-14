@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- `↑` / `↓` move through a narrowed list while still typing in a filter (Favorites, Explore, Downloads, playlist/offline details, playlist picker), instead of being ignored until `Enter`
+- The "System (Omarchy)" theme is only listed when an Omarchy palette is detected; elsewhere new installs default to Dark Purple, and a saved Omarchy theme displays as Dark Purple until Omarchy is present
+
 ## [1.18.0] - 2026-09-14
 
 ### Added

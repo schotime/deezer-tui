@@ -91,10 +91,23 @@ impl ThemeId {
             _ => None,
         }
     }
+
+    /// Themes offered in the picker: `ALL`, minus Omarchy when no usable
+    /// Omarchy palette was found by [`Theme::detect_omarchy`].
+    pub fn available() -> &'static [ThemeId] {
+        if OMARCHY_AVAILABLE.with(Cell::get) {
+            Self::ALL
+        } else {
+            // Omarchy is the first entry of `ALL`.
+            &Self::ALL[1..]
+        }
+    }
 }
 
 thread_local! {
     static CURRENT_THEME: Cell<ThemeId> = const { Cell::new(ThemeId::Omarchy) };
+    /// Whether a usable Omarchy `colors.toml` was found at the last detection.
+    static OMARCHY_AVAILABLE: Cell<bool> = const { Cell::new(false) };
     static OMARCHY_PALETTE: RefCell<Option<Palette>> = const { RefCell::new(None) };
     static OMARCHY_MODIFIED: RefCell<Option<SystemTime>> = const { RefCell::new(None) };
     /// Background transparency: 0 = fully opaque, 100 = fully transparent (terminal default bg).
@@ -241,6 +254,15 @@ fn text_on(fill: Color, candidates: &[Color]) -> Color {
 pub struct Theme;
 
 impl Theme {
+    /// Check for a usable Omarchy palette and remember the result for
+    /// [`ThemeId::available`]. Reads the file, so call it on startup and when
+    /// the theme picker opens rather than every frame.
+    pub fn detect_omarchy() -> bool {
+        let available = load_omarchy_palette().is_some();
+        OMARCHY_AVAILABLE.with(|a| a.set(available));
+        available
+    }
+
     /// Set the active theme.
     pub fn set(id: ThemeId) {
         CURRENT_THEME.with(|c| c.set(id));
@@ -595,6 +617,15 @@ magenta = "#ea76cb"
     #[test]
     fn light_omarchy_theme_is_readable() {
         assert_eq!(contrast_failures(CATPPUCCIN_LATTE), Vec::<String>::new());
+    }
+
+    #[test]
+    fn omarchy_hidden_unless_detected() {
+        OMARCHY_AVAILABLE.with(|a| a.set(false));
+        assert!(!ThemeId::available().contains(&ThemeId::Omarchy));
+        assert_eq!(ThemeId::available().len(), ThemeId::ALL.len() - 1);
+        OMARCHY_AVAILABLE.with(|a| a.set(true));
+        assert_eq!(ThemeId::available(), ThemeId::ALL);
     }
 
     #[test]
