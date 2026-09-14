@@ -931,7 +931,7 @@ fn draw_settings_overlay(frame: &mut Frame, view: &ViewState, selected: usize) {
 /// Draw the theme picker overlay.
 fn draw_theme_picker(frame: &mut Frame, view: &ViewState, selected: usize) {
     let s = t();
-    let themes = ThemeId::ALL;
+    let themes = ThemeId::available();
     let current = Theme::current();
     let transparent = Theme::is_transparent();
 

@@ -2042,15 +2042,22 @@ impl Client {
 
         // Load saved theme and opacity from config
         let mut config = Config::load();
-        if let Some(id) = config.theme.as_deref().and_then(ThemeId::from_str) {
-            Theme::set(id);
-        } else {
-            // New installs follow the active Omarchy palette by default. Save
-            // the choice explicitly so a later launch cannot fall back to an
-            // old built-in Deezer palette.
-            Theme::set(ThemeId::Omarchy);
-            config.theme = Some(ThemeId::Omarchy.as_str().to_string());
-            let _ = config.save();
+        let omarchy = Theme::detect_omarchy();
+        match config.theme.as_deref().and_then(ThemeId::from_str) {
+            // Omarchy saved but not present: show Dark Purple without
+            // rewriting the config, so the palette is picked up again if
+            // Omarchy is installed later.
+            Some(ThemeId::Omarchy) if !omarchy => Theme::set(ThemeId::DarkPurple),
+            Some(id) => Theme::set(id),
+            None if omarchy => {
+                // New installs follow the active Omarchy palette by default. Save
+                // the choice explicitly so a later launch cannot fall back to an
+                // old built-in Deezer palette.
+                Theme::set(ThemeId::Omarchy);
+                config.theme = Some(ThemeId::Omarchy.as_str().to_string());
+                let _ = config.save();
+            }
+            None => Theme::set(ThemeId::DarkPurple),
         }
         Theme::set_transparency(config.bg_transparency);
 
@@ -2583,6 +2590,8 @@ impl Client {
                     self.view.apply_favorites_filter();
                     return KeyAction::Continue;
                 }
+                // Arrows move through the narrowed list without leaving the input.
+                KeyCode::Up | KeyCode::Down => {}
                 _ => return KeyAction::Continue,
             }
         }
@@ -2610,6 +2619,7 @@ impl Client {
                     self.view.offline_filter_selected = 0;
                     return KeyAction::Continue;
                 }
+                KeyCode::Up | KeyCode::Down => {}
                 _ => return KeyAction::Continue,
             }
         }
@@ -2635,6 +2645,7 @@ impl Client {
                     self.view.apply_radio_filter();
                     return KeyAction::Continue;
                 }
+                KeyCode::Up | KeyCode::Down => {}
                 _ => return KeyAction::Continue,
             }
         }
@@ -2656,6 +2667,7 @@ impl Client {
                     self.view.apply_genres_filter();
                     return KeyAction::Continue;
                 }
+                KeyCode::Up | KeyCode::Down => {}
                 _ => return KeyAction::Continue,
             }
         }
@@ -2995,9 +3007,12 @@ impl Client {
                             }
                             1 => {
                                 // Themes
+                                Theme::detect_omarchy();
                                 let current = Theme::current();
-                                let idx =
-                                    ThemeId::ALL.iter().position(|&t| t == current).unwrap_or(0);
+                                let idx = ThemeId::available()
+                                    .iter()
+                                    .position(|&t| t == current)
+                                    .unwrap_or(0);
                                 self.view
                                     .push_overlay(Overlay::ThemePicker { selected: idx });
                                 return KeyAction::Continue;
@@ -3107,7 +3122,8 @@ impl Client {
             Overlay::WaitingList { .. } => self.handle_waiting_list_key(key),
             Overlay::OfflineDetail { .. } => self.handle_offline_detail_key(key),
             Overlay::ThemePicker { selected } => {
-                let count = ThemeId::ALL.len();
+                let themes = ThemeId::available();
+                let count = themes.len();
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         // Save transparency then go back to settings
@@ -3118,11 +3134,11 @@ impl Client {
                     }
                     code if ViewState::nav_up(code, vim_keys) => {
                         *selected = selected.saturating_sub(1);
-                        Theme::set(ThemeId::ALL[*selected]);
+                        Theme::set(themes[*selected]);
                     }
                     code if ViewState::nav_down(code, vim_keys) => {
                         *selected = (*selected + 1).min(count - 1);
-                        Theme::set(ThemeId::ALL[*selected]);
+                        Theme::set(themes[*selected]);
                     }
                     KeyCode::Left => {
                         // Transparency is a toggle: knob left = off.
@@ -3134,7 +3150,7 @@ impl Client {
                     }
                     KeyCode::Enter => {
                         // Confirm selection, save theme + transparency to config, back to settings
-                        let theme_id = ThemeId::ALL[*selected];
+                        let theme_id = themes[*selected];
                         let mut config = Config::load();
                         config.theme = Some(theme_id.as_str().to_string());
                         config.bg_transparency = Theme::transparency();
@@ -3463,7 +3479,10 @@ impl Client {
                 }
                 _ => {}
             }
-            return KeyAction::Continue;
+            // Arrows fall through to list navigation without leaving the input.
+            if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                return KeyAction::Continue;
+            }
         }
 
         let tracks: Vec<(usize, String)> = self
@@ -4023,7 +4042,10 @@ impl Client {
                 }
                 _ => {}
             }
-            return KeyAction::Continue;
+            // Arrows fall through to list navigation without leaving the input.
+            if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                return KeyAction::Continue;
+            }
         }
 
         // The cursor addresses the filtered view; resolve it to the track's real
@@ -4438,6 +4460,7 @@ impl Client {
                                 *selected = (*selected).min(total.saturating_sub(1));
                                 return KeyAction::Continue;
                             }
+                            KeyCode::Up | KeyCode::Down => {}
                             _ => return KeyAction::Continue,
                         }
                     }
