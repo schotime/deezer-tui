@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 - The "System (Omarchy)" theme is only listed when an Omarchy palette is detected; elsewhere new installs default to Dark Purple, and a saved Omarchy theme displays as Dark Purple until Omarchy is present
 - Favorites: the `g` shuffle hint sits right-aligned on the filter box border instead of on its own line
 
+### Fixed
+- Now Playing and MPRIS showed Deezer's grey placeholder cover for tracks played through a `FALLBACK` release whose requested id has no artwork; the stream's cover is now used instead
+
 ## [1.18.0] - 2026-09-14
 
 ### Added

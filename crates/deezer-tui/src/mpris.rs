@@ -51,7 +51,7 @@ impl MprisHandler {
 
 /// Build cover-art URL from a Deezer `ALB_PICTURE` md5 hash.
 fn cover_url(album_picture: &str) -> Option<String> {
-    if album_picture.is_empty() {
+    if !deezer_core::api::models::is_real_picture(album_picture) {
         return None;
     }
     Some(format!(
