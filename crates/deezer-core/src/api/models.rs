@@ -228,7 +228,9 @@ impl TrackData {
     /// row, the favorites entry the track was started from, the terminal title,
     /// MPRIS. Handing them the fallback id leaves the playing row unmarked and
     /// the track reading as un-favorited, so keep the requested identity and
-    /// take only `duration` from the stream, which is the audio that decodes.
+    /// take `duration` from the stream, which is the audio that decodes. The
+    /// requested id often has no artwork of its own, so the stream's cover is
+    /// used when the requested one is missing.
     ///
     /// A no-op when nothing was substituted.
     #[must_use]
@@ -236,11 +238,27 @@ impl TrackData {
         if self.track_id == requested.track_id {
             return self;
         }
+        let album_picture = if is_real_picture(&requested.album_picture) {
+            requested.album_picture.clone()
+        } else {
+            self.album_picture
+        };
         Self {
             duration: self.duration,
+            album_picture,
             ..requested.clone()
         }
     }
+}
+
+/// MD5 of the empty string. Deezer sends it as `ALB_PICTURE` for tracks with no
+/// cover of their own, and the image CDN answers it with a grey placeholder
+/// rather than an error.
+const EMPTY_PICTURE_MD5: &str = "d41d8cd98f00b204e9800998ecf8427e";
+
+/// Whether an `ALB_PICTURE` hash points at real artwork.
+pub fn is_real_picture(hash: &str) -> bool {
+    !hash.is_empty() && hash != EMPTY_PICTURE_MD5
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -848,6 +866,29 @@ mod tests {
         // Duration describes the audio that actually decodes, so it comes from
         // the stream.
         assert_eq!(played.duration, "360");
+    }
+
+    /// An unstreamable requested id can carry the empty-string MD5 as its cover,
+    /// which the CDN serves as a grey placeholder: borrow the stream's artwork.
+    #[test]
+    fn fallback_stream_lends_its_cover_when_the_requested_track_has_none() {
+        let with_picture = |id, picture: &str| TrackData {
+            album_picture: picture.to_owned(),
+            ..track(id, "Angels and Airwaves", "232")
+        };
+        let streamed = with_picture("202", "ffffffffffffffffffffffffffffffff");
+
+        for missing in ["", EMPTY_PICTURE_MD5] {
+            let played = streamed
+                .clone()
+                .with_identity_of(&with_picture("101", missing));
+            assert_eq!(played.track_id, "101");
+            assert_eq!(played.album_picture, "ffffffffffffffffffffffffffffffff");
+        }
+
+        let real = "bace8404908a8d565335e69b8a8dfd74";
+        let played = streamed.with_identity_of(&with_picture("101", real));
+        assert_eq!(played.album_picture, real);
     }
 
     #[test]

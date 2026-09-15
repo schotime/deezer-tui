@@ -2088,7 +2088,7 @@ impl Client {
                 .view
                 .current_track
                 .as_ref()
-                .filter(|track| !track.album_picture.is_empty())
+                .filter(|track| deezer_core::api::models::is_real_picture(&track.album_picture))
                 .map(|track| {
                     format!(
                         "https://e-cdns-images.dzcdn.net/images/cover/{}/500x500-000000-80-0-0.jpg",
