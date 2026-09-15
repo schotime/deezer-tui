@@ -472,6 +472,28 @@ impl Theme {
         Color::Rgb(50, 50, 50)
     }
 
+    /// Color along the visualizer's theme gradient: secondary at the base,
+    /// primary at the peak. Every built-in and Omarchy palette uses RGB;
+    /// retaining an endpoint is a safe fallback for terminal indexed colors.
+    pub fn visualizer_gradient(position: f32) -> Color {
+        let position = position.clamp(0.0, 1.0);
+        match (Self::secondary(), Self::primary()) {
+            (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+                let mix = |a: u8, b: u8| {
+                    (f32::from(a) + (f32::from(b) - f32::from(a)) * position).round() as u8
+                };
+                Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
+            }
+            (secondary, primary) => {
+                if position < 0.5 {
+                    secondary
+                } else {
+                    primary
+                }
+            }
+        }
+    }
+
     pub fn tab_active_color() -> Color {
         Self::primary()
     }

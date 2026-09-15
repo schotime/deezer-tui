@@ -6,6 +6,7 @@ mod i18n;
 #[cfg(target_os = "linux")]
 mod mpris;
 mod protocol;
+mod spectrum;
 mod terminal_text;
 mod theme;
 mod ui;

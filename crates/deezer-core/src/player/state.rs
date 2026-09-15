@@ -83,6 +83,9 @@ pub struct SavedState {
     pub repeat: RepeatMode,
     pub queue: Vec<TrackData>,
     pub queue_index: usize,
+    #[serde(default)]
+    pub position_secs: u64,
+    #[serde(default)]
     pub was_playing: bool,
 }
 
@@ -100,6 +103,7 @@ impl SavedState {
             repeat: state.repeat,
             queue: state.queue.clone(),
             queue_index: state.queue_index,
+            position_secs: state.position_secs,
             was_playing: matches!(
                 state.status,
                 PlaybackStatus::Playing | PlaybackStatus::Paused
@@ -111,8 +115,10 @@ impl SavedState {
         let Some(path) = Self::file_path() else {
             return Ok(());
         };
-        let json = serde_json::to_string(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string(self).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
@@ -121,5 +127,35 @@ impl SavedState {
         let json = std::fs::read_to_string(&path).ok()?;
         let _ = std::fs::remove_file(&path); // consume it
         serde_json::from_str(&json).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_state_keeps_position_and_reads_older_files() {
+        let state = PlayerState {
+            status: PlaybackStatus::Paused,
+            position_secs: 73,
+            ..PlayerState::default()
+        };
+        let saved = SavedState::from_player_state(&state);
+        assert_eq!(saved.position_secs, 73);
+        assert!(saved.was_playing);
+
+        let old_json = r#"{
+            "current_track": null,
+            "quality": "MP3_128",
+            "volume": 0.8,
+            "shuffle": false,
+            "repeat": "Off",
+            "queue": [],
+            "queue_index": 0
+        }"#;
+        let old: SavedState = serde_json::from_str(old_json).unwrap();
+        assert_eq!(old.position_secs, 0);
+        assert!(!old.was_playing);
     }
 }

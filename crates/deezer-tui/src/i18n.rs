@@ -173,6 +173,7 @@ pub struct Strings {
     pub help_volume: &'static str,
     pub help_album_detail: &'static str,
     pub help_artist_detail: &'static str,
+    pub help_now_playing: &'static str,
     pub help_waiting_list: &'static str,
     pub help_context_menu: &'static str,
     pub help_playing_menu: &'static str,
@@ -238,6 +239,7 @@ pub struct Strings {
     pub playlist: &'static str,
 
     // --- Waiting list ---
+    pub now_playing: &'static str,
     pub waiting_list: &'static str,
     pub queue_empty_title: &'static str,
     pub queue_empty_subtitle: &'static str,
@@ -768,6 +770,7 @@ static EN: Strings = Strings {
     help_volume: "Volume up / down",
     help_album_detail: "Album detail page",
     help_artist_detail: "Artist page",
+    help_now_playing: "Now Playing screen",
     help_waiting_list: "Waiting list (queue)",
     help_context_menu: "Track context menu",
     help_playing_menu: "Playing track menu",
@@ -825,6 +828,7 @@ static EN: Strings = Strings {
 
     playlist: " Playlist ",
 
+    now_playing: "Now Playing",
     waiting_list: "Waiting List",
     queue_empty_title: "Waiting list",
     queue_empty_subtitle: "No music playing",
@@ -1089,6 +1093,7 @@ static FR: Strings = Strings {
     help_volume: "Volume + / -",
     help_album_detail: "Page détail album",
     help_artist_detail: "Page artiste",
+    help_now_playing: "Écran En cours de lecture",
     help_waiting_list: "File d'attente",
     help_context_menu: "Menu contextuel",
     help_playing_menu: "Menu titre en cours",
@@ -1146,6 +1151,7 @@ static FR: Strings = Strings {
 
     playlist: " Playlist ",
 
+    now_playing: "En cours de lecture",
     waiting_list: "File d'attente",
     queue_empty_title: "File d'attente",
     queue_empty_subtitle: "Aucune musique jouée",
@@ -1409,6 +1415,7 @@ static ES: Strings = Strings {
     help_volume: "Volumen + / -",
     help_album_detail: "Detalle del álbum",
     help_artist_detail: "Página del artista",
+    help_now_playing: "Pantalla Reproduciendo",
     help_waiting_list: "Cola de reproducción",
     help_context_menu: "Menú contextual",
     help_playing_menu: "Menú canción actual",
@@ -1466,6 +1473,7 @@ static ES: Strings = Strings {
 
     playlist: " Playlist ",
 
+    now_playing: "Reproduciendo",
     waiting_list: "Cola de reproducción",
     queue_empty_title: "Lista de espera",
     queue_empty_subtitle: "Sin música en reproducción",
@@ -1729,6 +1737,7 @@ static PT: Strings = Strings {
     help_volume: "Volume + / -",
     help_album_detail: "Detalhe do álbum",
     help_artist_detail: "Página do artista",
+    help_now_playing: "Tela Tocando agora",
     help_waiting_list: "Fila de reprodução",
     help_context_menu: "Menu de contexto",
     help_playing_menu: "Menu da música atual",
@@ -1786,6 +1795,7 @@ static PT: Strings = Strings {
 
     playlist: " Playlist ",
 
+    now_playing: "Tocando agora",
     waiting_list: "Fila de reprodução",
     queue_empty_title: "Fila de reprodução",
     queue_empty_subtitle: "Nenhuma música tocando",
@@ -2049,6 +2059,7 @@ static DE: Strings = Strings {
     help_volume: "Lautstärke + / -",
     help_album_detail: "Albumdetailseite",
     help_artist_detail: "Künstlerseite",
+    help_now_playing: "Aktuelle-Wiedergabe-Ansicht",
     help_waiting_list: "Warteschlange",
     help_context_menu: "Kontextmenü",
     help_playing_menu: "Menü laufender Titel",
@@ -2106,6 +2117,7 @@ static DE: Strings = Strings {
 
     playlist: " Playlist ",
 
+    now_playing: "Aktuelle Wiedergabe",
     waiting_list: "Warteschlange",
     queue_empty_title: "Warteschlange",
     queue_empty_subtitle: "Keine Musik wird abgespielt",

@@ -19,6 +19,7 @@ use ratatui::widgets::TableState;
 use ratatui::Terminal;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
+use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -39,6 +40,7 @@ use crate::protocol::{
     FavoritesCategory, GenreDetailSubTab, GenreItem, MoodEntry, NavOverlay, OfflineCategory,
     RadioItem, Screen, SearchCategory, ServerMessage,
 };
+use crate::spectrum::{SpectrumCapture, SPECTRUM_BANDS};
 use crate::terminal_text::sanitize;
 use crate::theme::{Theme, ThemeId};
 use crate::ui;
@@ -155,6 +157,73 @@ pub enum SubMenu {
     ConfirmRemoveFavorite {
         confirm_yes: bool,
     },
+}
+
+/// Identifies the kind of layer currently drawn over terminal artwork. The
+/// terminal image protocols live outside ratatui's cell buffer, so changing a
+/// layer's footprint requires one full redraw to remove stale popup pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoverLayer {
+    Overlay(std::mem::Discriminant<Overlay>),
+    Popup(Option<std::mem::Discriminant<SubMenu>>),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+enum RestoredQueueView {
+    NowPlaying,
+    WaitingList,
+}
+
+/// Small client-only state file. Playback and queue data belong to the daemon;
+/// this records only which durable queue screen should be reopened.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct UiSession {
+    queue_view: Option<RestoredQueueView>,
+    #[serde(default)]
+    selected: usize,
+}
+
+impl UiSession {
+    fn path() -> Option<std::path::PathBuf> {
+        Config::dir().map(|dir| dir.join("ui_session.json"))
+    }
+
+    fn from_view(view: &ViewState) -> Self {
+        let queue_screen = std::iter::once(view.overlay.as_ref())
+            .chain(view.overlay_stack.iter().rev().map(Some))
+            .find_map(|overlay| match overlay {
+                Some(Overlay::NowPlaying { selected }) => {
+                    Some((RestoredQueueView::NowPlaying, *selected))
+                }
+                Some(Overlay::WaitingList { selected }) => {
+                    Some((RestoredQueueView::WaitingList, *selected))
+                }
+                _ => None,
+            });
+        match queue_screen {
+            Some((queue_view, selected)) => Self {
+                queue_view: Some(queue_view),
+                selected,
+            },
+            None => Self::default(),
+        }
+    }
+
+    fn load() -> Option<Self> {
+        let json = std::fs::read_to_string(Self::path()?).ok()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        let Some(path) = Self::path() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, json)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -561,6 +630,8 @@ pub enum Overlay {
     },
     /// Waiting list (upcoming tracks in queue).
     WaitingList { selected: usize },
+    /// Full-page playback view with artwork, visualizer, and queue.
+    NowPlaying { selected: usize },
     /// Track list of a downloaded album or playlist (Offline tab), as a modal.
     OfflineDetail {
         /// True when the target is a playlist, false for an album.
@@ -659,6 +730,7 @@ pub enum RowsKind {
     GenreDetail,
     PlaylistDetail,
     WaitingList,
+    NowPlayingQueue,
     /// Track list of the offline album/playlist detail modal.
     OfflineDetail,
     /// Option list of the open modal (menus, pickers, settings).
@@ -840,6 +912,8 @@ pub struct ViewState {
     /// dim the background around it without touching the image cells (dimming
     /// sixel/kitty image cells corrupts the artwork). `None` when no image.
     pub cover_image_area: Option<Rect>,
+    /// Real frequency-band levels captured from the active output monitor.
+    pub spectrum_levels: Vec<f32>,
 
     /// Button area set by the UI draw pass, used for mouse hit-testing.
     pub login_button_area: Cell<Option<Rect>>,
@@ -904,7 +978,7 @@ pub(crate) fn fuzzy_match(query: &str, target: &str) -> bool {
 }
 
 impl ViewState {
-    fn from_snapshot(snap: &DaemonSnapshot) -> Self {
+    pub(crate) fn from_snapshot(snap: &DaemonSnapshot) -> Self {
         Self {
             screen: snap.screen,
             active_tab: snap.active_tab,
@@ -1019,6 +1093,7 @@ impl ViewState {
             cover_image: None,
             cover_image_url: String::new(),
             cover_image_area: None,
+            spectrum_levels: vec![0.0; SPECTRUM_BANDS],
             login_button_area: Cell::new(None),
             click: RefCell::default(),
             scroll: RefCell::default(),
@@ -1139,6 +1214,39 @@ impl ViewState {
                     | Overlay::Updating { .. }
             )
         )
+    }
+
+    fn cover_layer(&self) -> Option<CoverLayer> {
+        if let Some(popup) = &self.popup {
+            return Some(CoverLayer::Popup(
+                popup.sub_menu.as_ref().map(std::mem::discriminant),
+            ));
+        }
+
+        match self.overlay.as_ref() {
+            // These are the artwork-bearing base pages, not layers over them.
+            None
+            | Some(Overlay::AlbumDetail { .. })
+            | Some(Overlay::ArtistDetail)
+            | Some(Overlay::NowPlaying { .. }) => None,
+            Some(overlay) => Some(CoverLayer::Overlay(std::mem::discriminant(overlay))),
+        }
+    }
+
+    fn restore_queue_view(&mut self, session: UiSession) {
+        let Some(queue_view) = session.queue_view else {
+            return;
+        };
+        if self.screen != Screen::Main || self.queue.is_empty() {
+            return;
+        }
+
+        let selected = session.selected.min(self.queue.len().saturating_sub(1));
+        self.overlay_stack.clear();
+        self.overlay = Some(match queue_view {
+            RestoredQueueView::NowPlaying => Overlay::NowPlaying { selected },
+            RestoredQueueView::WaitingList => Overlay::WaitingList { selected },
+        });
     }
 
     /// Drop the previous frame's clickable regions. Called once per draw pass,
@@ -1800,6 +1908,12 @@ pub struct Client {
     /// Last string written to the terminal title, to avoid rewriting it on
     /// every snapshot (the daemon ticks 4x per second).
     last_terminal_title: String,
+    /// Output-monitor worker, alive only while Now Playing is visible and audio plays.
+    spectrum_capture: Option<SpectrumCapture>,
+    /// Avoid retrying a failed capture command every 50 ms.
+    spectrum_capture_failed: bool,
+    /// Applied once, after the daemon's first real snapshot arrives.
+    pending_ui_session: Option<UiSession>,
 }
 
 /// Helper to restore standard terminal mode safely.
@@ -1871,18 +1985,72 @@ impl Client {
             image_cache: HashMap::new(),
             last_click: None,
             last_terminal_title: String::new(),
+            spectrum_capture: None,
+            spectrum_capture_failed: false,
+            pending_ui_session: UiSession::load(),
         })
     }
 
-    /// Get the current cover art URL from album/artist detail overlay.
-    fn current_cover_url(&self) -> Option<&str> {
-        // Search overlay chain (current + stack) for an active album/artist detail.
+    fn now_playing_visible(&self) -> bool {
+        std::iter::once(self.view.overlay.as_ref())
+            .chain(self.view.overlay_stack.iter().rev().map(Some))
+            .any(|overlay| matches!(overlay, Some(Overlay::NowPlaying { .. })))
+    }
+
+    /// Start/stop output-monitor capture with the page and drain its newest
+    /// spectrum frame. Pausing naturally decays the last frame to silence.
+    fn sync_spectrum_capture(&mut self) {
+        let should_capture = self.now_playing_visible()
+            && self.view.status == PlaybackStatus::Playing
+            && self.view.screen == Screen::Main;
+
+        if should_capture && self.spectrum_capture.is_none() && !self.spectrum_capture_failed {
+            match SpectrumCapture::start() {
+                Ok(capture) => self.spectrum_capture = Some(capture),
+                Err(error) => {
+                    debug!(%error, "Output-monitor spectrum capture unavailable");
+                    self.spectrum_capture_failed = true;
+                }
+            }
+        }
+
+        if !should_capture {
+            self.spectrum_capture = None;
+            self.spectrum_capture_failed = false;
+            let decay = if self.view.status == PlaybackStatus::Stopped {
+                0.0
+            } else {
+                0.82
+            };
+            for level in &mut self.view.spectrum_levels {
+                *level *= decay;
+            }
+            return;
+        }
+
+        let update = self.spectrum_capture.as_ref().map(SpectrumCapture::latest);
+        match update {
+            Some(Ok(Some(levels))) => self.view.spectrum_levels = levels,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.spectrum_capture = None;
+                self.spectrum_capture_failed = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Get the cover art URL for the active artwork-bearing page.
+    fn current_cover_url(&self) -> Option<String> {
+        // Search overlay chain (current + stack) for an active detail or Now
+        // Playing page. This keeps the image loaded under returning modals.
         let active = std::iter::once(self.view.overlay.as_ref())
             .chain(self.view.overlay_stack.iter().rev().map(Some))
             .find(|o| {
                 matches!(
                     o,
-                    Some(Overlay::AlbumDetail { .. }) | Some(Overlay::ArtistDetail)
+                    Some(Overlay::AlbumDetail { .. })
+                        | Some(Overlay::ArtistDetail)
+                        | Some(Overlay::NowPlaying { .. })
                 )
             });
         match active {
@@ -1890,7 +2058,7 @@ impl Client {
                 .view
                 .album_detail
                 .as_ref()
-                .map(|d| d.cover_url.as_str())
+                .map(|d| d.cover_url.clone())
                 .filter(|u| !u.is_empty()),
             Some(Some(Overlay::ArtistDetail)) => {
                 // When browsing Albums/Lives/Other, show selected album cover if available
@@ -1906,14 +2074,27 @@ impl Client {
                     }
                     _ => None,
                 };
-                album_cover.or_else(|| {
-                    self.view
-                        .artist_detail
-                        .as_ref()
-                        .map(|d| d.picture_url.as_str())
-                        .filter(|u| !u.is_empty())
-                })
+                album_cover
+                    .or_else(|| {
+                        self.view
+                            .artist_detail
+                            .as_ref()
+                            .map(|d| d.picture_url.as_str())
+                            .filter(|u| !u.is_empty())
+                    })
+                    .map(str::to_owned)
             }
+            Some(Some(Overlay::NowPlaying { .. })) => self
+                .view
+                .current_track
+                .as_ref()
+                .filter(|track| !track.album_picture.is_empty())
+                .map(|track| {
+                    format!(
+                        "https://e-cdns-images.dzcdn.net/images/cover/{}/500x500-000000-80-0-0.jpg",
+                        track.album_picture
+                    )
+                }),
             _ => None,
         }
     }
@@ -1945,7 +2126,7 @@ impl Client {
     /// Uses in-memory cache to avoid re-downloading images already seen on this page.
     fn maybe_fetch_cover_image(&mut self) {
         let url = match self.current_cover_url() {
-            Some(u) => u.to_string(),
+            Some(u) => u,
             None => {
                 // No overlay or no URL — clear image and cache
                 if self.view.cover_image.is_some() {
@@ -2108,7 +2289,7 @@ impl Client {
         let mut running = true;
         let mut send_shutdown = false;
         let mut update_check_done = config.skip_update_check;
-        let mut prev_over_image = false;
+        let mut previous_cover_layer = None;
 
         while running {
             // Clear expired toast
@@ -2123,22 +2304,22 @@ impl Client {
             // On detail pages `overlay` is the detail itself, so only count
             // layers drawn ON TOP of it: a popup, or a modal overlay that
             // replaces the detail (which then sits in `overlay_stack`).
-            let over_image = self.view.cover_image.is_some()
-                && (self.view.popup.is_some()
-                    || !matches!(
-                        self.view.overlay,
-                        Some(Overlay::AlbumDetail { .. }) | Some(Overlay::ArtistDetail)
-                    ));
-            if prev_over_image && !over_image {
+            let cover_layer = self
+                .view
+                .cover_image
+                .as_ref()
+                .and_then(|_| self.view.cover_layer());
+            if previous_cover_layer.is_some() && previous_cover_layer != cover_layer {
                 terminal.clear()?;
             }
-            prev_over_image = over_image;
+            previous_cover_layer = cover_layer;
 
             if self.sync_picker_cell_size() {
                 // A re-encoded cover can be smaller than the one on screen;
                 // clear so none of the old image's pixels are left around it.
                 terminal.clear()?;
             }
+            self.sync_spectrum_capture();
             Theme::refresh_omarchy();
             terminal.draw(|frame| {
                 ui::draw(frame, &mut self.view);
@@ -2294,6 +2475,9 @@ impl Client {
             match self.server_rx.try_recv() {
                 Ok(Ok(ServerMessage::Snapshot(snap))) => {
                     self.view.update_from_snapshot(snap);
+                    if let Some(session) = self.pending_ui_session.take() {
+                        self.view.restore_queue_view(session);
+                    }
                     self.update_terminal_title();
                     self.maybe_fetch_cover_image();
                 }
@@ -2338,6 +2522,10 @@ impl Client {
                     update_check_done = true;
                 }
             }
+        }
+
+        if let Err(error) = UiSession::from_view(&self.view).save() {
+            debug!(%error, "Failed to save UI session");
         }
 
         // Restore terminal
@@ -2402,6 +2590,24 @@ impl Client {
                 self.view.pop_overlay();
             } else {
                 self.view.push_overlay(Overlay::Info);
+            }
+            return KeyAction::Continue;
+        }
+
+        // p : toggle the dedicated Now Playing page.
+        if key.code == KeyCode::Char('p')
+            && self.view.screen == Screen::Main
+            && !self.view.is_text_input_active()
+            && !popup_typing
+            && self.view.popup.is_none()
+            && !self.view.has_modal_overlay()
+        {
+            if matches!(self.view.overlay, Some(Overlay::NowPlaying { .. })) {
+                self.view.pop_overlay();
+            } else {
+                self.view.push_overlay(Overlay::NowPlaying {
+                    selected: self.view.queue_index,
+                });
             }
             return KeyAction::Continue;
         }
@@ -3120,6 +3326,7 @@ impl Client {
             Overlay::ShowDetail { .. } => self.handle_show_detail_key(key),
             Overlay::GenreDetail { .. } => self.handle_genre_detail_key(key),
             Overlay::WaitingList { .. } => self.handle_waiting_list_key(key),
+            Overlay::NowPlaying { .. } => self.handle_now_playing_key(key),
             Overlay::OfflineDetail { .. } => self.handle_offline_detail_key(key),
             Overlay::ThemePicker { selected } => {
                 let themes = ThemeId::available();
@@ -4404,6 +4611,77 @@ impl Client {
         }
     }
 
+    /// Handle the queue embedded in the full-page Now Playing view.
+    fn handle_now_playing_key(&mut self, key: KeyEvent) -> KeyAction {
+        let selected = match self.view.overlay {
+            Some(Overlay::NowPlaying { selected }) => selected,
+            _ => return KeyAction::Continue,
+        };
+
+        if key.code == KeyCode::Char('x') {
+            if let Some(track) = self.view.queue.get(selected).cloned() {
+                let is_fav = self.view.is_track_favorite(&track.track_id);
+                self.view.popup = Some(PopupMenu::full(track, is_fav));
+            }
+            return KeyAction::Continue;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('p') => {
+                self.view.pop_overlay();
+                KeyAction::Continue
+            }
+            KeyCode::Enter => {
+                if selected < self.view.queue.len() {
+                    KeyAction::SendCommand(Command::PlayFromQueue { index: selected })
+                } else {
+                    KeyAction::Continue
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.view.overlay = Some(Overlay::NowPlaying {
+                    selected: selected.saturating_sub(1),
+                });
+                KeyAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = self.view.queue.len().saturating_sub(1);
+                self.view.overlay = Some(Overlay::NowPlaying {
+                    selected: (selected + 1).min(max),
+                });
+                KeyAction::Continue
+            }
+            KeyCode::Delete | KeyCode::Char('d') => {
+                if selected != self.view.queue_index && selected < self.view.queue.len() {
+                    let new_selected = selected.min(self.view.queue.len().saturating_sub(2));
+                    self.view.overlay = Some(Overlay::NowPlaying {
+                        selected: new_selected,
+                    });
+                    KeyAction::SendCommand(Command::RemoveFromQueue { index: selected })
+                } else {
+                    KeyAction::Continue
+                }
+            }
+            KeyCode::Char('f') => {
+                let Some(track) = self.view.queue.get(selected) else {
+                    return KeyAction::Continue;
+                };
+                if self.view.is_track_favorite(&track.track_id) {
+                    KeyAction::SendCommand(Command::RemoveFavorite {
+                        track_id: track.track_id.clone(),
+                    })
+                } else {
+                    KeyAction::SendCommand(Command::AddFavorite {
+                        track_id: track.track_id.clone(),
+                    })
+                }
+            }
+            other => self
+                .player_control_action(other)
+                .unwrap_or(KeyAction::Continue),
+        }
+    }
+
     /// Handle key events when a popup menu is open.
     fn handle_popup_key(&mut self, key: KeyEvent) -> KeyAction {
         let vim_keys = self.view.vim_keys;
@@ -5231,8 +5509,7 @@ impl Client {
                 }
             }
             ClickTarget::ShuffleFavorites => KeyAction::SendCommand(Command::ShuffleFavorites),
-            // Player bar: right click only.
-            ClickTarget::CurrentTrack => KeyAction::Continue,
+            ClickTarget::CurrentTrack => self.handle_key(KeyEvent::from(KeyCode::Char('p'))),
             ClickTarget::Back => self.handle_key(KeyEvent::from(KeyCode::Esc)),
             // Focus the left column, as `h` does — only when it has something to
             // scroll, otherwise focus there means nothing.
@@ -5342,6 +5619,12 @@ impl Client {
             }
             RowsKind::WaitingList => {
                 if let Some(Overlay::WaitingList { selected }) = self.view.overlay.as_mut() {
+                    *selected = index;
+                }
+                None
+            }
+            RowsKind::NowPlayingQueue => {
+                if let Some(Overlay::NowPlaying { selected }) = self.view.overlay.as_mut() {
                     *selected = index;
                 }
                 None
@@ -5679,6 +5962,44 @@ mod tests {
 
         view.input_mode = InputMode::Typing;
         assert!(view.is_text_input_active());
+    }
+
+    #[test]
+    fn cover_layer_changes_for_nested_dialogs_but_not_selection() {
+        let mut view = ViewState::from_snapshot(&DaemonSnapshot::default());
+        view.overlay = Some(Overlay::Settings { selected: 0 });
+        let settings = view.cover_layer();
+
+        view.overlay = Some(Overlay::Settings { selected: 2 });
+        assert_eq!(view.cover_layer(), settings);
+
+        view.overlay = Some(Overlay::QualityPicker { selected: 2 });
+        assert_ne!(view.cover_layer(), settings);
+
+        view.overlay = Some(Overlay::AlbumDetail { from_artist: false });
+        assert_eq!(view.cover_layer(), None);
+    }
+
+    #[test]
+    fn queue_view_session_ignores_transient_dialogs_and_clamps_selection() {
+        let mut view = ViewState::from_snapshot(&DaemonSnapshot::default());
+        view.queue = vec![serde_json::from_value(serde_json::json!({
+            "SNG_ID": "1",
+            "SNG_TITLE": "Song",
+            "ART_NAME": "Artist"
+        }))
+        .unwrap()];
+        view.screen = Screen::Main;
+        view.overlay_stack = vec![Overlay::NowPlaying { selected: 99 }];
+        view.overlay = Some(Overlay::Settings { selected: 2 });
+
+        let session = UiSession::from_view(&view);
+        view.overlay = None;
+        view.overlay_stack.clear();
+        view.restore_queue_view(session);
+
+        assert_eq!(view.overlay, Some(Overlay::NowPlaying { selected: 0 }));
+        assert!(view.overlay_stack.is_empty());
     }
 
     #[test]
