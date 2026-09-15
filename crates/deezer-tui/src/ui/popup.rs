@@ -28,6 +28,7 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState) {
             | Some(Overlay::PlaylistDetail { .. })
             | Some(Overlay::ShowDetail { .. })
             | Some(Overlay::WaitingList { .. })
+            | Some(Overlay::NowPlaying { .. })
     );
     // Keep the cover image (if one was drawn this frame) out of the dim pass —
     // dimming sixel/kitty image cells corrupts the artwork. `cover_image_area`
@@ -86,7 +87,8 @@ pub fn draw(frame: &mut Frame, view: &mut ViewState) {
         }
         Some(Overlay::AlbumDetail { .. })
         | Some(Overlay::ArtistDetail)
-        | Some(Overlay::GenreDetail { .. }) => {
+        | Some(Overlay::GenreDetail { .. })
+        | Some(Overlay::NowPlaying { .. }) => {
             // Detail views are rendered in the main content area
             // Don't return — let the popup (context menu) render on top if open
         }
@@ -713,6 +715,7 @@ fn draw_help_overlay(frame: &mut Frame, view: &ViewState, scroll: usize) -> usiz
         (None, s.help_section_menus),
         (Some("a"), s.help_album_detail),
         (Some("t"), s.help_artist_detail),
+        (Some("p"), s.help_now_playing),
         (Some("w"), s.help_waiting_list),
         (Some("x"), s.help_context_menu),
         (Some("Ctrl+Space"), s.help_playing_menu),

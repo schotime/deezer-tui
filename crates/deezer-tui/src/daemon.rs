@@ -14,7 +14,7 @@ use deezer_core::api::models::{
 use deezer_core::api::DeezerClient;
 use deezer_core::offline::OfflineIndex;
 use deezer_core::player::engine::PlayerEngine;
-use deezer_core::player::state::{PlaybackStatus, PlayerState, RepeatMode};
+use deezer_core::player::state::{PlaybackStatus, PlayerState, RepeatMode, SavedState};
 use deezer_core::Config;
 
 use crate::favorites_cache::FavoritesCache;
@@ -266,6 +266,9 @@ pub struct Daemon {
 
     // Generation counter to discard stale track fetch results
     track_generation: u64,
+    /// Saved position applied when the restored track finishes loading. This
+    /// is cleared by any normal playback request before then.
+    pending_session_restore: Option<u64>,
     // Count consecutive failed track fetches to avoid infinite skip loop
     consecutive_skip_count: u32,
 
@@ -321,8 +324,37 @@ impl Daemon {
             .as_ref()
             .map(|tracks| tracks.iter().map(|t| t.track_id.clone()).collect())
             .unwrap_or_default();
+        let cached_favorite_tracks = favorites_cache.tracks.clone().unwrap_or_default();
+        let saved_state = SavedState::load();
+        let pending_session_restore = saved_state.as_ref().and_then(|saved| {
+            (saved.was_playing && saved.current_track.is_some()).then_some(saved.position_secs)
+        });
+        let restored_player_state = saved_state.map(|saved| {
+            let queue_index = saved.queue_index.min(saved.queue.len().saturating_sub(1));
+            let has_current = saved.current_track.is_some();
+            PlayerState {
+                status: if saved.was_playing && has_current {
+                    PlaybackStatus::Paused
+                } else {
+                    PlaybackStatus::Stopped
+                },
+                duration_secs: saved
+                    .current_track
+                    .as_ref()
+                    .map(TrackData::duration_secs)
+                    .unwrap_or(0),
+                current_track: saved.current_track,
+                quality: saved.quality,
+                position_secs: saved.position_secs,
+                volume: initial_volume,
+                shuffle: saved.shuffle,
+                repeat: saved.repeat,
+                queue: saved.queue,
+                queue_index,
+            }
+        });
 
-        Ok(Self {
+        let mut daemon = Self {
             config,
             screen,
             active_tab: if is_offline {
@@ -346,7 +378,9 @@ impl Daemon {
             new_releases_loading: false,
             last_search_query: String::new(),
 
-            favorites: Vec::new(),
+            // Canonical backing list for favorite indicators, independent of
+            // whichever Favorites category is currently displayed.
+            favorites: cached_favorite_tracks,
             favorites_selected: 0,
             favorites_loading: false,
             favorites_category: FavoritesCategory::default(),
@@ -393,11 +427,11 @@ impl Daemon {
             nav_overlay: None,
             nav_overlay_stack: Vec::new(),
 
-            player_state: Arc::new(Mutex::new(PlayerState {
+            player_state: Arc::new(Mutex::new(restored_player_state.unwrap_or(PlayerState {
                 volume: initial_volume,
                 quality: initial_quality,
                 ..PlayerState::default()
-            })),
+            }))),
 
             client: Arc::new(tokio::sync::Mutex::new(client)),
             cdn_http,
@@ -414,6 +448,7 @@ impl Daemon {
             playback_started_at: None,
             playback_offset_secs: 0,
             track_generation: 0,
+            pending_session_restore,
             consecutive_skip_count: 0,
             flow_active: false,
             active_mood: None,
@@ -423,7 +458,15 @@ impl Daemon {
             mpris: None,
             #[cfg(target_os = "linux")]
             mpris_last: crate::mpris::MprisSnapshot::default(),
-        })
+        };
+        let (shuffle, queue_len, queue_index) = {
+            let state = daemon.player_state.lock().unwrap();
+            (state.shuffle, state.queue.len(), state.queue_index)
+        };
+        if shuffle {
+            daemon.rebuild_shuffle_order(queue_len, queue_index);
+        }
+        Ok(daemon)
     }
 
     /// Run the daemon: listen for client connections and process commands.
@@ -451,6 +494,7 @@ impl Daemon {
                 Ok(engine) => {
                     engine.set_volume(self.config.volume);
                     self.engine = Some(engine);
+                    self.start_restored_track();
                 }
                 Err(e) => {
                     warn!("Failed to init audio engine in offline mode: {e}");
@@ -602,6 +646,14 @@ impl Daemon {
                     broadcast_snapshot(&clients, snap).await;
                     self.mpris_refresh().await;
                 }
+            }
+        }
+
+        // Preserve the latest queue and playback position across an explicit
+        // daemon shutdown. Restored playback is always paused.
+        if let Ok(state) = self.player_state.lock() {
+            if let Err(error) = SavedState::from_player_state(&state).save() {
+                warn!(%error, "Failed to save playback session");
             }
         }
 
@@ -1541,7 +1593,6 @@ impl Daemon {
             }
             FavoritesCategory::Artists => {
                 if let Some(items) = self.favorites_cache.artists.clone() {
-                    self.favorites.clear();
                     self.favorites_display = items;
                     self.favorites_selected = 0;
                     self.favorites_loading = false;
@@ -1550,7 +1601,6 @@ impl Daemon {
             }
             FavoritesCategory::Albums => {
                 if let Some(items) = self.favorites_cache.albums.clone() {
-                    self.favorites.clear();
                     self.favorites_display = items;
                     self.favorites_selected = 0;
                     self.favorites_loading = false;
@@ -1559,7 +1609,6 @@ impl Daemon {
             }
             FavoritesCategory::Playlists => {
                 if let Some(items) = self.favorites_cache.playlists.clone() {
-                    self.favorites.clear();
                     self.favorites_display = items;
                     self.favorites_selected = 0;
                     self.favorites_loading = false;
@@ -1568,7 +1617,6 @@ impl Daemon {
             }
             FavoritesCategory::Following => {
                 if let Some(items) = self.favorites_cache.following.clone() {
-                    self.favorites.clear();
                     self.favorites_display = items;
                     self.favorites_selected = 0;
                     self.favorites_loading = false;
@@ -2345,7 +2393,28 @@ impl Daemon {
         });
     }
 
+    fn start_restored_track(&mut self) {
+        let Some(position_secs) = self.pending_session_restore.take() else {
+            return;
+        };
+        let track = self
+            .player_state
+            .lock()
+            .ok()
+            .and_then(|state| state.current_track.clone());
+        let Some(track) = track else { return };
+
+        let generation = self.track_generation;
+        self.start_play_track(track);
+        // `start_play_track` can decline the request (for example, online-only
+        // media while offline). Only arm restoration if a fetch was started.
+        if self.track_generation != generation {
+            self.pending_session_restore = Some(position_secs);
+        }
+    }
+
     fn start_play_track(&mut self, track: TrackData) {
+        self.pending_session_restore = None;
         if self.is_offline {
             // Only `Command::PlayFromOffline*` used to reach the on-disk copy,
             // so `next`, `previous` and the end-of-track auto-advance all died
@@ -2924,6 +2993,12 @@ impl Daemon {
                                 Some(t().fmt_error(t().status_audio_init_error, &e.to_string()));
                         }
                     }
+                    if self.engine.is_some() {
+                        self.start_restored_track();
+                    }
+                    // Recently Played is the default visible category, while
+                    // genuine favorites are loaded separately for heart markers.
+                    self.start_load_favorites();
                     self.start_load_favorites_category();
                     self.start_load_favorite_ids();
                     self.start_load_radios();
@@ -2981,7 +3056,6 @@ impl Daemon {
                         self.status_msg = Some(t().fmt_loaded(tracks.len()));
                         self.favorites_display =
                             tracks.iter().map(DisplayItem::from_track).collect();
-                        self.favorites = tracks;
                         self.favorites_selected = 0;
                     }
                 }
@@ -3006,7 +3080,6 @@ impl Daemon {
                     if category == self.favorites_category {
                         self.favorites_loading = false;
                         self.status_msg = Some(t().fmt_loaded(items.len()));
-                        self.favorites.clear();
                         self.favorites_display = items;
                         self.favorites_selected = 0;
                     }
@@ -3015,7 +3088,6 @@ impl Daemon {
                     if category == self.favorites_category {
                         self.favorites_loading = false;
                         self.favorites_display.clear();
-                        self.favorites.clear();
                         self.favorites_selected = 0;
                         self.status_msg = Some(t().fmt_error(t().status_favorites_error, &err));
                     }
@@ -3510,13 +3582,30 @@ impl Daemon {
                         bytes = audio_data.len(),
                         "process_async: TrackReady, calling play_decoded"
                     );
+                    let restored_position = self.pending_session_restore.take();
                     if let Some(ref mut engine) = self.engine {
-                        match engine.play_decoded(audio_data, &track, quality) {
+                        let result = if let Some(position_secs) = restored_position {
+                            engine.load_decoded(
+                                audio_data,
+                                &track,
+                                quality,
+                                Duration::from_secs(position_secs),
+                                true,
+                            )
+                        } else {
+                            engine.play_decoded(audio_data, &track, quality)
+                        };
+                        match result {
                             Ok(()) => {
                                 info!(gen = generation, track_id = %track.track_id, "process_async: play_decoded OK");
                                 self.consecutive_skip_count = 0;
-                                self.playback_started_at = Some(Instant::now());
-                                self.playback_offset_secs = 0;
+                                if let Some(position_secs) = restored_position {
+                                    self.playback_started_at = None;
+                                    self.playback_offset_secs = position_secs;
+                                } else {
+                                    self.playback_started_at = Some(Instant::now());
+                                    self.playback_offset_secs = 0;
+                                }
                                 self.status_msg = None;
                             }
                             Err(e) => {
@@ -3796,6 +3885,7 @@ impl Daemon {
     }
 
     fn start_play_offline_track(&mut self, track: TrackData) {
+        self.pending_session_restore = None;
         self.track_generation += 1;
         let generation = self.track_generation;
         self.listen_logged_for = None;

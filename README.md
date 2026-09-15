@@ -44,6 +44,7 @@ sudo mv deezer-tui /usr/local/bin/deezer-tui
 ✅ Focused element context menu `x`<br>
 ✅ Album page `a`<br>
 ✅ Artist page `t`<br>
+✅ Dedicated Now Playing screen with artwork, queue, and a PipeWire/PulseAudio-reactive visualizer `p`<br>
 ✅ Waiting list `w`<br>
 ✅ Shortcut menu `?`<br>
 ✅ Global app menu `ctrl+o`<br>
@@ -106,5 +107,3 @@ Terminal audio players
 * https://github.com/raziman18/gomu
 * https://github.com/dhulihan/grump
 * https://github.com/Kingtous/RustPlayer
-
-

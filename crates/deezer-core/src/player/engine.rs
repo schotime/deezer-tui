@@ -46,6 +46,20 @@ impl PlayerEngine {
         track: &TrackData,
         quality: AudioQuality,
     ) -> Result<(), DeezerError> {
+        self.load_decoded(audio_data, track, quality, Duration::ZERO, false)
+    }
+
+    /// Load decoded audio at a saved position, optionally leaving the sink
+    /// paused. Pausing before returning prevents session restore from emitting
+    /// audio unexpectedly.
+    pub fn load_decoded(
+        &mut self,
+        audio_data: Vec<u8>,
+        track: &TrackData,
+        quality: AudioQuality,
+        position: Duration,
+        start_paused: bool,
+    ) -> Result<(), DeezerError> {
         let cursor = Cursor::new(audio_data);
         let source = Decoder::new(cursor)
             .map_err(|e| DeezerError::Playback(format!("Failed to decode audio: {e}")))?;
@@ -58,8 +72,24 @@ impl PlayerEngine {
         self.sink =
             Sink::try_new(&self.stream_handle).map_err(|e| DeezerError::Playback(e.to_string()))?;
         self.sink.set_volume(current_volume);
+        if start_paused {
+            // Pause the empty sink before attaching the source, so no sample can
+            // escape between append/seek and the later state update.
+            self.sink.pause();
+        }
         self.sink.append(source);
-        self.sink.play();
+        let mut position_secs = position.as_secs().min(track.duration_secs());
+        if position_secs > 0 {
+            // Some formats may not support seeking; loading from the beginning
+            // is preferable to discarding an otherwise valid restored session.
+            if let Err(error) = self.sink.try_seek(Duration::from_secs(position_secs)) {
+                debug!(%error, "Could not seek restored track");
+                position_secs = 0;
+            }
+        }
+        if !start_paused {
+            self.sink.play();
+        }
 
         info!(
             title = %track.title,
@@ -70,10 +100,14 @@ impl PlayerEngine {
 
         {
             let mut state = self.state.lock().unwrap();
-            state.status = PlaybackStatus::Playing;
+            state.status = if start_paused {
+                PlaybackStatus::Paused
+            } else {
+                PlaybackStatus::Playing
+            };
             state.current_track = Some(track.clone());
             state.duration_secs = track.duration_secs();
-            state.position_secs = 0;
+            state.position_secs = position_secs;
             state.quality = quality;
         }
 

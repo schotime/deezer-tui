@@ -8,6 +8,7 @@ pub mod favorites;
 pub mod genre_detail;
 pub mod login;
 pub mod moods;
+pub mod now_playing;
 pub mod player;
 pub mod popup;
 pub mod radio;
@@ -49,16 +50,6 @@ fn draw_main(frame: &mut Frame, view: &mut ViewState) {
         area,
     );
 
-    // Layout: tabs (3 lines) | content (fill) | player bar (4 lines)
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),                 // Tab bar (tabs + bottom border)
-            Constraint::Min(5),                    // Content area
-            Constraint::Length(PLAYER_BAR_HEIGHT), // Player bar
-        ])
-        .split(area);
-
     // Content area: detail overlays replace tab content.
     // Show album/artist detail as background whenever it appears anywhere in the overlay chain
     // (current overlay or any stacked overlay). This handles cases where Help/Settings/Info
@@ -76,6 +67,7 @@ fn draw_main(frame: &mut Frame, view: &mut ViewState) {
     let mut show_album = false;
     let mut show_artist = false;
     let mut show_genre = false;
+    let mut show_now_playing = false;
     let all_overlays =
         std::iter::once(view.overlay.as_ref()).chain(view.overlay_stack.iter().rev().map(Some));
     for o in all_overlays {
@@ -92,42 +84,63 @@ fn draw_main(frame: &mut Frame, view: &mut ViewState) {
                 show_genre = true;
                 break;
             }
+            Some(Overlay::NowPlaying { .. }) => {
+                show_now_playing = true;
+                break;
+            }
             _ => {}
         }
     }
 
-    // Tab bar (computed after show_album/show_artist/show_genre)
-    draw_tabs(
-        frame,
-        view,
-        chunks[0],
-        show_album || show_artist || show_genre,
-    );
+    // Now Playing gets the full content height. The global player bar remains
+    // visible, while the normal tab strip is hidden so it does not compete
+    // with the artwork, metadata, visualizer, and queue.
+    let (content_area, player_area) = if show_now_playing {
+        let chunks = Layout::vertical([Constraint::Min(5), Constraint::Length(PLAYER_BAR_HEIGHT)])
+            .split(area);
+        (chunks[0], chunks[1])
+    } else {
+        let chunks = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(5),
+            Constraint::Length(PLAYER_BAR_HEIGHT),
+        ])
+        .split(area);
+        draw_tabs(
+            frame,
+            view,
+            chunks[0],
+            show_album || show_artist || show_genre,
+        );
+        (chunks[1], chunks[2])
+    };
 
-    if show_album {
-        album_detail::draw(frame, view, chunks[1], detail_as_background);
+    if show_now_playing {
+        now_playing::draw(frame, view, content_area);
+    } else if show_album {
+        album_detail::draw(frame, view, content_area, detail_as_background);
     } else if show_artist {
-        artist_detail::draw(frame, view, chunks[1], detail_as_background);
+        artist_detail::draw(frame, view, content_area, detail_as_background);
     } else if show_genre {
-        genre_detail::draw(frame, view, chunks[1]);
+        genre_detail::draw(frame, view, content_area);
     } else {
         match view.active_tab {
-            ActiveTab::Search => search::draw(frame, view, chunks[1]),
-            ActiveTab::Favorites => favorites::draw(frame, view, chunks[1]),
-            ActiveTab::Explore => explore::draw(frame, view, chunks[1]),
-            ActiveTab::Downloads => downloads::draw(frame, view, chunks[1]),
+            ActiveTab::Search => search::draw(frame, view, content_area),
+            ActiveTab::Favorites => favorites::draw(frame, view, content_area),
+            ActiveTab::Explore => explore::draw(frame, view, content_area),
+            ActiveTab::Downloads => downloads::draw(frame, view, content_area),
         }
     }
 
     // Player bar
-    player::draw(frame, view, chunks[2]);
+    player::draw(frame, view, player_area);
 
     // Popup overlay (drawn on top of everything)
     popup::draw(frame, view);
 
     // Status notification: right-aligned on the player bar's top separator.
     // Drawn last so popups' backdrop dimming doesn't wash it out.
-    draw_notification(frame, view, chunks[2]);
+    draw_notification(frame, view, player_area);
 }
 
 /// Draw the transient status notification as a right-aligned chip on the
@@ -163,6 +176,7 @@ fn back_destination(view: &ViewState) -> String {
             view.playlist_detail.as_ref().map(|p| p.title.as_str())
         }
         Some(Overlay::GenreDetail { .. }) => view.genre_detail.as_ref().map(|g| g.name.as_str()),
+        Some(Overlay::NowPlaying { .. }) => Some(t().now_playing),
         _ => None,
     };
     let dest = match name {
