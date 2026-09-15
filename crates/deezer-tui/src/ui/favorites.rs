@@ -13,17 +13,14 @@ pub fn draw(frame: &mut Frame, view: &ViewState, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Category menu
-            Constraint::Length(2), // Shuffle button
-            Constraint::Length(3), // Filter input
+            Constraint::Length(1), // Spacer
+            Constraint::Length(3), // Filter input (shuffle hint on its border)
             Constraint::Min(3),    // Favorites table
         ])
         .split(area);
 
     // Category menu
     draw_category_menu(frame, view, chunks[0]);
-
-    // Shuffle button
-    draw_shuffle_button(frame, view, chunks[1]);
 
     // Filter input
     draw_filter_input(frame, view, chunks[2]);
@@ -45,48 +42,48 @@ fn draw_category_menu(frame: &mut Frame, view: &ViewState, area: Rect) {
     common::draw_category_menu(frame, view, area, &labels, current);
 }
 
-fn draw_shuffle_button(frame: &mut Frame, view: &ViewState, area: Rect) {
-    let label = t().shuffle_favorites;
-    let line = Line::from(vec![
-        Span::raw("  "),
+/// `g Shuffle play my favorites`, right-aligned on the filter box's top border
+/// like the tab bar's `Tab Switch tabs` hint.
+fn shuffle_hint() -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
         Span::styled("g", Theme::shortcut_key()),
         Span::raw(" "),
         Span::styled(
-            label,
+            t().shuffle_favorites,
             Style::default()
                 .fg(Theme::text_color())
                 .add_modifier(Modifier::BOLD),
         ),
-    ]);
-    let width = line.width() as u16;
-    frame.render_widget(Paragraph::new(line), area);
-    view.record_click(
-        Rect {
-            x: area.x + 2,
-            y: area.y,
-            width: width.saturating_sub(2).min(area.width),
-            height: 1,
-        },
-        ClickTarget::ShuffleFavorites,
-    );
+        Span::raw(" "),
+    ])
 }
 
 fn draw_filter_input(frame: &mut Frame, view: &ViewState, area: Rect) {
     let s = t();
     let is_typing = view.favorites_filter_typing;
-    let input_block = Block::default()
+    let title = shortcut_line(if is_typing {
+        s.favorites_filter_typing
+    } else {
+        s.favorites_filter_normal
+    });
+    let hint = shuffle_hint();
+    let hint_width = hint.width() as u16;
+    // Two corners plus a little breathing room between the two titles.
+    let show_hint = area.width >= title.width() as u16 + hint_width + 4;
+
+    let mut input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(if is_typing {
             Theme::border_focused()
         } else {
             Theme::border()
         })
-        .title(shortcut_line(if is_typing {
-            s.favorites_filter_typing
-        } else {
-            s.favorites_filter_normal
-        }))
+        .title(title)
         .title_style(Theme::title());
+    if show_hint {
+        input_block = input_block.title_top(hint.alignment(Alignment::Right));
+    }
 
     let input_text = if view.favorites_filter_input.is_empty() && !is_typing {
         Span::styled(s.favorites_filter_placeholder, Theme::dim())
@@ -97,6 +94,18 @@ fn draw_filter_input(frame: &mut Frame, view: &ViewState, area: Rect) {
     let input = Paragraph::new(input_text).block(input_block);
     frame.render_widget(input, area);
     view.record_click(area, ClickTarget::FilterInput);
+    if show_hint {
+        // Recorded after the input so the hint wins clicks on its border cells.
+        view.record_click(
+            Rect {
+                x: area.x + area.width - 1 - hint_width,
+                y: area.y,
+                width: hint_width,
+                height: 1,
+            },
+            ClickTarget::ShuffleFavorites,
+        );
+    }
 
     if is_typing {
         let cursor_x = area.x + 1 + view.favorites_filter_input.len() as u16;
