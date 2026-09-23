@@ -14,11 +14,61 @@ const PIPE_GRAPHQL_URL: &str = "https://pipe.deezer.com/api";
 const PERSONAL_SONGS_PLAYLIST_ID: &str = "__deezer_personal_songs__";
 
 impl DeezerClient {
-    fn api_token(&self) -> Result<&str, DeezerError> {
-        self.session
-            .as_ref()
-            .map(|s| s.api_token.as_str())
+    fn api_token(&self) -> Result<String, DeezerError> {
+        if self.session.is_none() {
+            return Err(DeezerError::Auth("Not authenticated".into()));
+        }
+        self.api_token
+            .lock()
+            .ok()
+            .and_then(|t| t.clone())
             .ok_or_else(|| DeezerError::Auth("Not authenticated".into()))
+    }
+
+    /// POST to gw-light and return the raw body. If the CSRF token has
+    /// expired, refresh it once and retry.
+    async fn gw_post(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, DeezerError> {
+        let mut api_token = self.api_token()?;
+        let mut retried = false;
+        loop {
+            let url = format!(
+                "{GW_LIGHT_URL}?method={method}&input=3&api_version=1.0&api_token={api_token}"
+            );
+
+            let resp = self
+                .http
+                .post(&url)
+                .json(params)
+                .send()
+                .await
+                .map_err(|e| DeezerError::Http(e.to_string()))?;
+
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| DeezerError::Http(e.to_string()))?;
+
+            let token_rejected = body
+                .get("error")
+                .and_then(|e| e.as_object())
+                .is_some_and(|o| o.contains_key("VALID_TOKEN_REQUIRED"));
+            if token_rejected && !retried {
+                retried = true;
+                api_token = self.refresh_api_token().await?;
+                continue;
+            }
+
+            if let Some(error) = body.get("error") {
+                if !error.as_object().map_or(true, |o| o.is_empty()) {
+                    return Err(DeezerError::Api(error.to_string()));
+                }
+            }
+            return Ok(body);
+        }
     }
 
     /// Call a gateway API method.
@@ -27,31 +77,9 @@ impl DeezerClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, DeezerError> {
-        let api_token = self.api_token()?;
-        let url =
-            format!("{GW_LIGHT_URL}?method={method}&input=3&api_version=1.0&api_token={api_token}");
-
         debug!(method, "Gateway API call");
 
-        let resp = self
-            .http
-            .post(&url)
-            .json(&params)
-            .send()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?;
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?;
-
-        // Check for API-level errors
-        if let Some(error) = body.get("error") {
-            if !error.as_object().map_or(true, |o| o.is_empty()) {
-                return Err(DeezerError::Api(error.to_string()));
-            }
-        }
+        let body = self.gw_post(method, &params).await?;
 
         body.get("results")
             .cloned()
@@ -64,31 +92,9 @@ impl DeezerClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<(), DeezerError> {
-        let api_token = self.api_token()?;
-        let url =
-            format!("{GW_LIGHT_URL}?method={method}&input=3&api_version=1.0&api_token={api_token}");
-
         debug!(method, "Gateway API call (void)");
 
-        let resp = self
-            .http
-            .post(&url)
-            .json(&params)
-            .send()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?;
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?;
-
-        if let Some(error) = body.get("error") {
-            if !error.as_object().map_or(true, |o| o.is_empty()) {
-                return Err(DeezerError::Api(error.to_string()));
-            }
-        }
-
+        self.gw_post(method, &params).await?;
         Ok(())
     }
 
@@ -1903,7 +1909,9 @@ fn is_stale_jwt(err: &DeezerError) -> bool {
             msg.contains("jwt")
                 && (msg.contains("expired")
                     || msg.contains("reauthenticate")
-                    || msg.contains("invalid"))
+                    || msg.contains("re-authenticate")
+                    || msg.contains("invalid")
+                    || msg.contains("not valid"))
         }
         _ => false,
     }
@@ -1925,6 +1933,10 @@ mod tests {
         // The message Deezer actually returns, as reported in #14.
         assert!(is_stale_jwt(&DeezerError::Api(
             "GraphQL error: JWT token has expired, please reauthenticate".into()
+        )));
+        // Newer wording, returned with type JwtTokenExpiredError.
+        assert!(is_stale_jwt(&DeezerError::Api(
+            "GraphQL error: Given jwt token is not valid anymore, please refresh it or re-authenticate".into()
         )));
         // The 401/403 path raises Auth instead.
         assert!(is_stale_jwt(&DeezerError::Auth(
