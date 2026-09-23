@@ -17,6 +17,9 @@ pub struct DeezerClient {
     pub(crate) session: Option<Session>,
     /// Cached JWT for pipe.deezer.com GraphQL API. Lazily fetched.
     pub(crate) jwt_cache: Mutex<Option<String>>,
+    /// Current gateway CSRF token (checkForm). Starts as the session's token
+    /// and is refreshed in place when Deezer rejects it as expired.
+    pub(crate) api_token: Mutex<Option<String>>,
 }
 
 impl DeezerClient {
@@ -36,6 +39,7 @@ impl DeezerClient {
             cookie_jar,
             session: None,
             jwt_cache: Mutex::new(None),
+            api_token: Mutex::new(None),
         })
     }
 

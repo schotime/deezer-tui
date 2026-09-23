@@ -24,31 +24,7 @@ impl DeezerClient {
         self.cookie_jar
             .add_cookie_str(&cookie, &DEEZER_URL.parse().unwrap());
 
-        // Call getUserData to validate the token and get session info.
-        // The server will also set a session cookie (sid) in the response,
-        // which the cookie jar will automatically store for subsequent calls.
-        let url =
-            format!("{GW_LIGHT_URL}?method=deezer.getUserData&input=3&api_version=1.0&api_token=");
-
-        let resp = self
-            .http
-            .post(&url)
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?;
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| DeezerError::Http(e.to_string()))?;
-
-        let results = body
-            .get("results")
-            .ok_or_else(|| DeezerError::Api("Missing 'results' in response".into()))?;
-
-        let user_data: UserData = serde_json::from_value(results.clone())
-            .map_err(|e| DeezerError::Api(format!("Failed to parse user data: {e}")))?;
+        let user_data = self.fetch_user_data().await?;
 
         if user_data.user.user_id == 0 {
             return Err(DeezerError::Auth("Invalid ARL token — user_id is 0".into()));
@@ -80,8 +56,55 @@ impl DeezerClient {
             "Authenticated successfully"
         );
 
+        if let Ok(mut token) = self.api_token.lock() {
+            *token = Some(session.api_token.clone());
+        }
         self.session = Some(session.clone());
         Ok(session)
+    }
+
+    /// Call getUserData with the cookies in the jar (ARL + sid).
+    /// The server also sets/refreshes the session cookie (sid) in the response,
+    /// which the cookie jar stores for subsequent calls.
+    async fn fetch_user_data(&self) -> Result<UserData, DeezerError> {
+        let url =
+            format!("{GW_LIGHT_URL}?method=deezer.getUserData&input=3&api_version=1.0&api_token=");
+
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|e| DeezerError::Http(e.to_string()))?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| DeezerError::Http(e.to_string()))?;
+
+        let results = body
+            .get("results")
+            .ok_or_else(|| DeezerError::Api("Missing 'results' in response".into()))?;
+
+        serde_json::from_value(results.clone())
+            .map_err(|e| DeezerError::Api(format!("Failed to parse user data: {e}")))
+    }
+
+    /// Fetch a fresh CSRF token after the gateway rejected the current one
+    /// (it expires along with the server-side session).
+    pub(crate) async fn refresh_api_token(&self) -> Result<String, DeezerError> {
+        debug!("Refreshing gateway CSRF token");
+        let user_data = self.fetch_user_data().await?;
+        if user_data.user.user_id == 0 {
+            return Err(DeezerError::Auth(
+                "Session expired — ARL token is no longer valid".into(),
+            ));
+        }
+        if let Ok(mut token) = self.api_token.lock() {
+            *token = Some(user_data.api_token.clone());
+        }
+        Ok(user_data.api_token)
     }
 }
 
