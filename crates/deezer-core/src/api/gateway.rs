@@ -770,16 +770,28 @@ impl DeezerClient {
 
     /// Add an album to the user's favorites.
     pub async fn add_favorite_album(&self, album_id: &str) -> Result<(), DeezerError> {
-        let id = parse_id(album_id);
-        let params = json!({ "ALB_ID": id });
-        self.gw_call_void("favorite_album.add", params).await
+        let query = r#"
+          mutation AddAlbumToFavorite($albumId: String!) {
+            addAlbumToFavorite(albumId: $albumId) { album { id } }
+          }
+        "#;
+        let data = self
+            .graphql_call_with_variables(query, json!({ "albumId": album_id }))
+            .await?;
+        check_favorite_album_response(&data, "addAlbumToFavorite", album_id)
     }
 
     /// Remove an album from the user's favorites.
     pub async fn remove_favorite_album(&self, album_id: &str) -> Result<(), DeezerError> {
-        let id = parse_id(album_id);
-        let params = json!({ "ALB_ID": id });
-        self.gw_call_void("favorite_album.remove", params).await
+        let query = r#"
+          mutation RemoveAlbumFromFavorite($albumId: String!) {
+            removeAlbumFromFavorite(albumId: $albumId) { album { id } }
+          }
+        "#;
+        let data = self
+            .graphql_call_with_variables(query, json!({ "albumId": album_id }))
+            .await?;
+        check_favorite_album_response(&data, "removeAlbumFromFavorite", album_id)
     }
 
     /// Add tracks to a playlist.
@@ -1793,6 +1805,24 @@ fn parse_search_section<T: serde::de::DeserializeOwned>(
         .ok_or_else(|| DeezerError::Api("Missing 'data' in search section".into()))?;
     serde_json::from_value(data.clone())
         .map_err(|e| DeezerError::Api(format!("Failed to parse search section: {e}")))
+}
+
+fn check_favorite_album_response(
+    data: &serde_json::Value,
+    mutation: &str,
+    album_id: &str,
+) -> Result<(), DeezerError> {
+    let returned_id = data
+        .get(mutation)
+        .and_then(|result| result.pointer("/album/id"))
+        .and_then(value_string);
+    if returned_id.as_deref() == Some(album_id) {
+        Ok(())
+    } else {
+        Err(DeezerError::Api(format!(
+            "Unexpected {mutation} response for album {album_id}"
+        )))
+    }
 }
 
 /// Parse a string ID as a JSON integer if possible, otherwise keep it as a string.
