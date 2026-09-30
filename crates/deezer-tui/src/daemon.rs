@@ -27,6 +27,8 @@ use crate::protocol::{
 use deezer_core::api::models::GenreDetail;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
+/// Past this point in a track, "previous" restarts it instead of going back.
+const PREV_RESTART_THRESHOLD_SECS: u64 = 5;
 
 /// Async results from background tasks.
 enum AsyncResult {
@@ -2871,6 +2873,16 @@ impl Daemon {
 
     fn play_prev(&mut self) {
         let was_paused = self.player_state.lock().unwrap().status == PlaybackStatus::Paused;
+
+        // Past the first few seconds, "previous" restarts the current track;
+        // pressing it again right after goes to the previous one. If the
+        // format can't seek, fall through and change track as before.
+        if self.player_state.lock().unwrap().position_secs > PREV_RESTART_THRESHOLD_SECS {
+            self.seek_absolute(0);
+            if self.player_state.lock().unwrap().position_secs == 0 {
+                return;
+            }
+        }
 
         let (queue_len, current, shuffle) = {
             let state = self.player_state.lock().unwrap();

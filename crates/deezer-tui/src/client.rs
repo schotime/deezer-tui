@@ -703,8 +703,10 @@ pub enum ClickTarget {
     FlowChip,
     /// Heart icon / Like button in the player bar to toggle favorite for current track.
     ToggleLikeCurrentTrack,
-    /// Playing track's name / progress bar in the player bar.
+    /// Playing track's name in the player bar.
     CurrentTrack,
+    /// Progress bar of the playing track: a click seeks to that point.
+    ProgressBar,
     /// "g Shuffle" button on the Favorites tab.
     ShuffleFavorites,
     /// "Esc Back to …" hint at the top of a detail page.
@@ -774,11 +776,16 @@ pub struct ClickAreas {
 impl ClickAreas {
     /// Topmost target under this cell — later draws win, as they render on top.
     fn hit(&self, col: u16, row: u16) -> Option<ClickTarget> {
+        self.hit_area(col, row).map(|(_, target)| target)
+    }
+
+    /// Like [`Self::hit`], with the target's recorded area.
+    fn hit_area(&self, col: u16, row: u16) -> Option<(Rect, ClickTarget)> {
         self.targets
             .iter()
             .rev()
             .find(|(rect, _)| contains(*rect, col, row))
-            .map(|(_, target)| *target)
+            .copied()
     }
 }
 
@@ -5339,10 +5346,11 @@ impl Client {
         });
         self.last_click = Some((col, row, Instant::now()));
 
-        let (target, rows, modal) = {
+        let (hit, rows, modal) = {
             let click = self.view.click.borrow();
-            (click.hit(col, row), click.rows, click.modal)
+            (click.hit_area(col, row), click.rows, click.modal)
         };
+        let target = hit.map(|(_, target)| target);
 
         match modal {
             // Clicking the dimmed backdrop closes the modal on top.
@@ -5366,6 +5374,9 @@ impl Client {
             self.view.blur_inputs();
         }
 
+        if let Some((area, ClickTarget::ProgressBar)) = hit {
+            return self.seek_to_click(area, col);
+        }
         if let Some(target) = target {
             return self.activate_click_target(target);
         }
@@ -5385,6 +5396,24 @@ impl Client {
         // Double click: select, then act on the row as Enter would.
         let action = self.handle_key(KeyEvent::from(KeyCode::Enter));
         with_selection(select, action)
+    }
+
+    /// Seek the playing track to the point of the progress bar that was clicked.
+    fn seek_to_click(&mut self, bar: Rect, col: u16) -> KeyAction {
+        let duration = self.view.duration_secs;
+        if self.view.current_track.is_none() || duration == 0 || bar.width == 0 {
+            return KeyAction::Continue;
+        }
+        // Aim at the middle of the clicked cell, except on the first one, which
+        // restarts the track.
+        let offset = u64::from(col.saturating_sub(bar.x));
+        let width = u64::from(bar.width);
+        let secs = if offset == 0 {
+            0
+        } else {
+            (duration * (2 * offset + 1) / (2 * width)).min(duration.saturating_sub(1))
+        };
+        KeyAction::SendCommand(Command::SeekAbsolute { secs })
     }
 
     /// Activate the clicked option of the open modal. The cursor is walked there
@@ -5453,7 +5482,7 @@ impl Client {
 
         if let Some(target) = target {
             // Same as Ctrl+Space: manage menu for the playing track.
-            if matches!(target, ClickTarget::CurrentTrack) {
+            if matches!(target, ClickTarget::CurrentTrack | ClickTarget::ProgressBar) {
                 self.view.blur_inputs();
                 return self.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
             }
@@ -5510,6 +5539,8 @@ impl Client {
             }
             ClickTarget::ShuffleFavorites => KeyAction::SendCommand(Command::ShuffleFavorites),
             ClickTarget::CurrentTrack => self.handle_key(KeyEvent::from(KeyCode::Char('p'))),
+            // Needs the click position: handled in `handle_left_click`.
+            ClickTarget::ProgressBar => KeyAction::Continue,
             ClickTarget::Back => self.handle_key(KeyEvent::from(KeyCode::Esc)),
             // Focus the left column, as `h` does — only when it has something to
             // scroll, otherwise focus there means nothing.

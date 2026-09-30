@@ -129,7 +129,7 @@ pub fn draw(frame: &mut Frame, view: &ViewState, area: Rect) {
         .ratio(ratio)
         .label(time_label);
     frame.render_widget(progress, progress_chunks[0]);
-    view.record_click(progress_chunks[0], ClickTarget::CurrentTrack);
+    view.record_click(progress_chunks[0], ClickTarget::ProgressBar);
 
     let vol_line = Line::from(vec![
         Span::raw(" "),
